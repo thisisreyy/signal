@@ -1,6 +1,9 @@
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import {
+  DEFAULT_BUSINESS,
+  DEFAULT_COMPETITORS,
+  DEFAULT_KEYWORDS,
   DEFAULT_URLS,
   ensureAgentState,
   getAgentState,
@@ -34,8 +37,31 @@ export const getConfig = query({
     const config = await getConfigDoc(ctx);
     return {
       urls: config?.urls ?? DEFAULT_URLS,
+      business: config?.business ?? DEFAULT_BUSINESS,
+      keywords: config?.keywords ?? DEFAULT_KEYWORDS,
+      competitors: config?.competitors ?? DEFAULT_COMPETITORS,
       injectFailure: config?.injectFailure ?? false,
     };
+  },
+});
+
+/** Update any part of the growth config; omitted fields are left alone. */
+export const setGrowthConfig = mutation({
+  args: {
+    business: v.optional(v.object({ name: v.string(), domain: v.string() })),
+    keywords: v.optional(v.array(v.string())),
+    competitors: v.optional(v.array(v.string())),
+  },
+  handler: async (ctx, args) => {
+    const patch = Object.fromEntries(
+      Object.entries(args).filter(([, value]) => value !== undefined),
+    );
+    const config = await getConfigDoc(ctx);
+    if (config) {
+      await ctx.db.patch(config._id, patch);
+    } else {
+      await ctx.db.insert("config", { key: "singleton", ...patch });
+    }
   },
 });
 
@@ -126,6 +152,24 @@ export const removeUrl = mutation({
       await ctx.db.patch(config._id, { urls: next });
     } else {
       await ctx.db.insert("config", { key: "singleton", urls: next });
+    }
+  },
+});
+
+/** Dev/demo reset: wipe all run history (config and state survive). */
+export const resetHistory = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    for (const table of ["runs", "checks", "keywordChecks"] as const) {
+      const docs = await ctx.db.query(table).collect();
+      for (const doc of docs) await ctx.db.delete(doc._id);
+    }
+    const state = await getAgentState(ctx);
+    if (state) {
+      await ctx.db.patch(state._id, {
+        lastSuccessfulRunId: undefined,
+        lastSuccessfulAt: undefined,
+      });
     }
   },
 });

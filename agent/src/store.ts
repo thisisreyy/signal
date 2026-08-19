@@ -16,7 +16,7 @@ export interface RunStore {
   startRun(args: {
     runKey: string;
     trigger: "cron" | "manual";
-    urlsTotal: number;
+    itemsTotal: number;
   }): Promise<{ runId: string; created: boolean }>;
   /** Per-URL results from the last successful run, keyed by URL. */
   getBaseline(): Promise<Record<string, BaselineEntry>>;

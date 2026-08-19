@@ -43,7 +43,7 @@ export async function executeRun(args: {
   const { runId, created } = await store.startRun({
     runKey,
     trigger,
-    urlsTotal: config.urls.length,
+    itemsTotal: config.urls.length,
   });
   if (!created) {
     return { kind: "skipped", reason: "duplicate" };

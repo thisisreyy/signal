@@ -45,7 +45,7 @@ export class FakeStore implements RunStore {
     return { urls: this.urls, injectFailure: this.injectFailure };
   }
 
-  async startRun(args: { runKey: string; trigger: "cron" | "manual"; urlsTotal: number }) {
+  async startRun(args: { runKey: string; trigger: "cron" | "manual"; itemsTotal: number }) {
     const existing = this.runs.find((r) => r.runKey === args.runKey);
     if (existing) return { runId: existing.runId, created: false };
     const runId = `run-${this.runs.length + 1}`;

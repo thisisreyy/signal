@@ -32,7 +32,7 @@ export class ConvexRunStore implements RunStore {
   async startRun(args: {
     runKey: string;
     trigger: "cron" | "manual";
-    urlsTotal: number;
+    itemsTotal: number;
   }): Promise<{ runId: string; created: boolean }> {
     return await this.client.mutation(api.runs.start, args);
   }

@@ -33,15 +33,15 @@ export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
 
 function describe(run: Doc<"runs">): { icon: string; tone: string; text: string } {
   if (run.status === "running") {
-    return { icon: "◌", tone: "idle", text: `Checking ${run.urlsTotal} sites…` };
+    return { icon: "◌", tone: "idle", text: `Checking ${run.itemsTotal} sites…` };
   }
   if (run.status === "failed") {
-    const crashed = run.urlsCompleted < run.urlsTotal;
+    const crashed = run.itemsCompleted < run.itemsTotal;
     return {
       icon: "✕",
       tone: "bad",
       text: crashed
-        ? `Check crashed partway (${run.urlsCompleted} of ${run.urlsTotal} sites done) — nothing lost, the next check healed itself`
+        ? `Check crashed partway (${run.itemsCompleted} of ${run.itemsTotal} sites done) — nothing lost, the next check healed itself`
         : `Check failed — ${run.error ?? "unknown error"}`,
     };
   }
@@ -49,13 +49,13 @@ function describe(run: Doc<"runs">): { icon: string; tone: string; text: string 
     return {
       icon: "Δ",
       tone: "warn",
-      text: `Checked ${run.urlsCompleted} sites — ${run.changesCount} ${run.changesCount === 1 ? "change" : "changes"} since last time`,
+      text: `Checked ${run.itemsCompleted} sites — ${run.changesCount} ${run.changesCount === 1 ? "change" : "changes"} since last time`,
     };
   }
   return {
     icon: "✓",
     tone: "good",
-    text: `Checked ${run.urlsCompleted} sites — no changes`,
+    text: `Checked ${run.itemsCompleted} sites — no changes`,
   };
 }
 

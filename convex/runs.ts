@@ -38,7 +38,7 @@ export const start = mutation({
   args: {
     runKey: v.string(),
     trigger,
-    urlsTotal: v.number(),
+    itemsTotal: v.number(),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -53,8 +53,8 @@ export const start = mutation({
       trigger: args.trigger,
       status: "running",
       startedAt: Date.now(),
-      urlsTotal: args.urlsTotal,
-      urlsCompleted: 0,
+      itemsTotal: args.itemsTotal,
+      itemsCompleted: 0,
       changesCount: 0,
     });
     return { runId, created: true as const };

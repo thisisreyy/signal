@@ -37,7 +37,7 @@ export const record = mutation({
       checkedAt: Date.now(),
     });
     await ctx.db.patch(runId, {
-      urlsCompleted: run.urlsCompleted + 1,
+      itemsCompleted: (run.itemsCompleted ?? 0) + 1,
       changesCount: run.changesCount + (args.change ? 1 : 0),
     });
     return checkId;

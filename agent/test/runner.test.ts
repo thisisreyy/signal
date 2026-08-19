@@ -135,7 +135,7 @@ describe("executeRun", () => {
   test("a crashed run (stuck 'running') is marked failed by the next run's sweep", async () => {
     const store = makeStore();
     // Simulate a crash: a run started long ago that never finalized.
-    await store.startRun({ runKey: "cron-old", trigger: "cron", urlsTotal: 3 });
+    await store.startRun({ runKey: "cron-old", trigger: "cron", itemsTotal: 3 });
     const crashed = store.runs[0]!;
     crashed.startedAt = Date.now() - 60 * 60 * 1000;
     expect(crashed.status).toBe("running");
