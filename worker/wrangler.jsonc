@@ -10,9 +10,8 @@
     "crons": ["0 6 * * *"]
   },
   "vars": {
-    // Overridden locally by .dev.vars; set to the real deployment URL
-    // (npx convex dashboard shows it) before `wrangler deploy`.
-    "CONVEX_URL": "https://YOUR-DEPLOYMENT.convex.cloud"
+    // Overridden locally by .dev.vars.
+    "CONVEX_URL": "https://brave-bass-198.convex.cloud"
   },
   "observability": {
     "enabled": true

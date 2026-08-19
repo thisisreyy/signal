@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 
-// In production the dashboard is served BY the worker, so relative URLs work;
-// in local dev Vite (5173) and wrangler (8787) are separate processes.
-const WORKER_URL = (import.meta.env.VITE_WORKER_URL as string | undefined) ?? "";
+// In production the dashboard is served BY the worker, so relative URLs are
+// always correct — VITE_WORKER_URL is honored only in dev, where Vite (5173)
+// and wrangler (8787) are separate processes.
+const WORKER_URL = import.meta.env.DEV
+  ? ((import.meta.env.VITE_WORKER_URL as string | undefined) ?? "http://localhost:8787")
+  : "";
 
 export async function triggerCheck(): Promise<void> {
   // One key per call: a retried request can't start a second run.
