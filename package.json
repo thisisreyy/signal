@@ -1,0 +1,20 @@
+{
+  "name": "signal",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "agent",
+    "worker",
+    "dashboard"
+  ],
+  "scripts": {
+    "dev:convex": "convex dev",
+    "typecheck": "tsc -p convex && bun run --filter '*' typecheck"
+  },
+  "dependencies": {
+    "convex": "^1.28.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
