@@ -15,17 +15,17 @@ export const list = query({
   },
 });
 
-/** One run plus all of its per-URL checks, for the detail view. */
+/** One run plus all of its per-keyword results, for the detail view. */
 export const get = query({
   args: { runId: v.id("runs") },
   handler: async (ctx, args) => {
     const run = await ctx.db.get(args.runId);
     if (!run) return null;
-    const checks = await ctx.db
-      .query("checks")
-      .withIndex("by_run_url", (q) => q.eq("runId", args.runId))
+    const keywordChecks = await ctx.db
+      .query("keywordChecks")
+      .withIndex("by_run_keyword", (q) => q.eq("runId", args.runId))
       .collect();
-    return { run, checks };
+    return { run, keywordChecks };
   },
 });
 
@@ -39,6 +39,7 @@ export const start = mutation({
     runKey: v.string(),
     trigger,
     itemsTotal: v.number(),
+    source: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -51,6 +52,7 @@ export const start = mutation({
     const runId = await ctx.db.insert("runs", {
       runKey: args.runKey,
       trigger: args.trigger,
+      source: args.source,
       status: "running",
       startedAt: Date.now(),
       itemsTotal: args.itemsTotal,
@@ -94,26 +96,25 @@ export const finish = mutation({
 });
 
 /**
- * Per-URL results of the last successful run — the baseline new results are
- * diffed against. Failed runs never appear here because the checkpoint only
- * advances in `finish` on success.
+ * Per-keyword positions of the last successful run — the baseline new results
+ * are diffed against. Failed runs never appear here because the checkpoint
+ * only advances in `finish` on success, and errored keyword rows are excluded
+ * so a transient fetch failure can never fabricate ranking changes.
  */
 export const baseline = query({
   args: {},
   handler: async (ctx) => {
     const state = await getAgentState(ctx);
     if (!state?.lastSuccessfulRunId) return [];
-    const checks = await ctx.db
-      .query("checks")
-      .withIndex("by_run_url", (q) =>
+    const rows = await ctx.db
+      .query("keywordChecks")
+      .withIndex("by_run_keyword", (q) =>
         q.eq("runId", state.lastSuccessfulRunId!),
       )
       .collect();
-    return checks.map((c) => ({
-      url: c.url,
-      ok: c.ok,
-      statusCode: c.statusCode,
-    }));
+    return rows
+      .filter((row) => row.error === undefined)
+      .map((row) => ({ keyword: row.keyword, positions: row.positions }));
   },
 });
 

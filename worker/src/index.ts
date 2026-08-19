@@ -3,10 +3,18 @@
  * small HTTP surface allows manual triggers and health checks. All state
  * lives in Convex — the Worker is deliberately stateless and replaceable.
  */
-import { ConvexRunStore, executeRun, type RunOutcome } from "@signal/agent";
+import {
+  ConvexRunStore,
+  executeRun,
+  SerperSource,
+  SimulatedSource,
+  type RunOutcome,
+} from "@signal/agent";
 
 export interface Env {
   CONVEX_URL: string;
+  /** Serper API key (wrangler secret). Absent = simulated demo data. */
+  SERPER_API_KEY?: string;
 }
 
 /**
@@ -20,8 +28,11 @@ function cronRunKey(scheduledTime: number): string {
 
 async function runOnce(env: Env, runKey: string, trigger: "cron" | "manual"): Promise<RunOutcome> {
   const store = new ConvexRunStore(env.CONVEX_URL);
-  const outcome = await executeRun({ store, runKey, trigger });
-  console.log(`run ${runKey} (${trigger}):`, JSON.stringify(outcome));
+  const source = env.SERPER_API_KEY
+    ? new SerperSource(env.SERPER_API_KEY)
+    : new SimulatedSource();
+  const outcome = await executeRun({ store, source, runKey, trigger });
+  console.log(`run ${runKey} (${trigger}, ${source.name}):`, JSON.stringify(outcome));
   return outcome;
 }
 

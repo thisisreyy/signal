@@ -1,34 +1,40 @@
+import { useQuery } from "convex/react";
+import { api } from "../../../convex/_generated/api";
 import { formatAgo } from "../format";
 
-export interface SiteSummary {
-  url: string;
-  latest: { ok: boolean; checkedAt: number } | null;
-}
-
-/** One plain-English sentence about the whole system, nothing to decode. */
+/** One plain-English sentence about where the business stands. */
 export function Hero({
-  sites,
+  businessName,
+  keywordCount,
   paused,
   lastSuccessfulAt,
 }: {
-  sites: SiteSummary[];
+  businessName: string;
+  keywordCount: number;
   paused: boolean;
   lastSuccessfulAt: number | null;
 }) {
-  const checked = sites.filter((s) => s.latest !== null);
-  const down = checked.filter((s) => !s.latest!.ok);
+  const baseline = useQuery(api.runs.baseline, {});
 
-  let mood: "good" | "bad" | "idle" = "good";
-  let headline = "All systems up";
-  if (checked.length === 0) {
-    mood = "idle";
-    headline = "Add a website to start watching";
-  } else if (down.length > 0) {
-    mood = "bad";
-    headline =
-      down.length === 1
-        ? `1 of ${checked.length} sites is down`
-        : `${down.length} of ${checked.length} sites are down`;
+  let mood: "good" | "bad" | "idle" = "idle";
+  let headline = "Waiting for the first ranking check";
+
+  if (baseline && baseline.length > 0) {
+    const yours = baseline.map(
+      (row) => row.positions.find((p) => p.isBusiness)?.position,
+    );
+    const ranked = yours.filter((p) => p !== undefined).length;
+    const top3 = yours.filter((p) => p !== undefined && p <= 3).length;
+    if (ranked === 0) {
+      mood = "bad";
+      headline = `${businessName} isn't in the top 20 for any tracked keyword`;
+    } else if (top3 > 0) {
+      mood = "good";
+      headline = `Top 3 for ${top3} of ${baseline.length} keywords`;
+    } else {
+      mood = "good";
+      headline = `Ranking for ${ranked} of ${baseline.length} keywords`;
+    }
   }
 
   return (
@@ -36,9 +42,11 @@ export function Hero({
       <span className={`hero-dot hero-dot-${mood}`} aria-hidden="true" />
       <h2 className="hero-headline">{headline}</h2>
       <p className="hero-sub">
-        {lastSuccessfulAt ? <>Last checked {formatAgo(lastSuccessfulAt)}</> : "Not checked yet"}
+        {businessName} vs {`competitors on ${keywordCount} keywords`}
         {" · "}
-        {paused ? "automatic checks are off" : "checks run every 5 minutes"}
+        {lastSuccessfulAt ? <>last checked {formatAgo(lastSuccessfulAt)}</> : "not checked yet"}
+        {" · "}
+        {paused ? "automatic checks are off" : "checks run daily"}
       </p>
     </section>
   );

@@ -1,11 +1,5 @@
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 
-export const DEFAULT_URLS = [
-  "https://example.com",
-  "https://www.anthropic.com",
-  "https://httpstat.us/200",
-];
-
 // Demo growth config — a real business with real, competitive SERPs, so the
 // agent produces meaningful data before the user customizes anything.
 export const DEFAULT_BUSINESS = { name: "Anthropic", domain: "anthropic.com" };

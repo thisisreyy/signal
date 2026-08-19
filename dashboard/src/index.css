@@ -286,6 +286,115 @@ body {
 .add-hint { font-size: 12px; color: var(--muted); }
 .add-error { font-size: 12px; color: var(--critical-text); }
 
+/* Keyword card extras */
+.rank-big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+.rank-unranked { font-size: 15px; font-weight: 550; color: var(--muted); }
+
+.ranklist { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.ranklist li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.ranklist-you {
+  font-weight: 650;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 6px;
+  padding: 1px 6px;
+  margin: 0 -6px;
+}
+.ranklist-icon { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+.ranklist-domain { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ranklist-pos { font-variant-numeric: tabular-nums; }
+
+/* Two-column band: signals + tracking */
+.two-col {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 16px;
+  margin-bottom: 30px;
+}
+@media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+
+.panel-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--card-shadow);
+  padding: 18px;
+}
+.panel-card h2 { font-size: 16px; font-weight: 650; margin-bottom: 10px; }
+
+.signals { list-style: none; padding: 0; display: flex; flex-direction: column; }
+.signal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--hairline);
+  font-size: 13.5px;
+}
+.signal-row:first-child { border-top: none; }
+.signal-text { flex: 1; min-width: 0; }
+.signal-when { color: var(--muted); font-size: 12px; flex: none; }
+
+/* Tracking panel */
+.tracking .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.tracking .field > span { font-size: 12.5px; color: var(--ink-2); font-weight: 550; }
+.field-row { display: flex; gap: 8px; }
+.tracking input {
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+  background: var(--page);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+}
+.tracking input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field-row input { flex: 1; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  border-radius: 999px;
+  padding: 3px 5px 3px 11px;
+}
+.chip-tag button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 5px;
+}
+.chip-tag button:hover { color: var(--critical-text); }
+.chip-demo {
+  padding: 2px 10px;
+  color: var(--warning-text);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  font-weight: 600;
+}
+.chip-add input {
+  border: 1px dashed var(--hairline);
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  width: 130px;
+}
+
 /* ---------- Sparkline ---------- */
 
 .spark { position: relative; }

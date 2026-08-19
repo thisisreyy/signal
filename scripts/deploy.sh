@@ -19,3 +19,5 @@ cd worker
 bun x wrangler deploy --var CONVEX_URL:"$CONVEX_URL"
 
 echo "==> Done. The workers.dev URL above is the live dashboard."
+echo "==> For real Google rankings, set the Serper key once:"
+echo "      cd worker && bun x wrangler secret put SERPER_API_KEY"

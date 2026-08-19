@@ -3,17 +3,16 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { formatDuration, formatTime } from "../format";
-import { hostOf, triggerCheck } from "../lib";
-import { ChangePill, CheckStatusPill } from "./pills";
+import { triggerCheck } from "../lib";
 
-/** Runs as plain sentences; click one to see the per-site details. */
+/** Runs as plain sentences; click one to see the per-keyword details. */
 export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
   const [openRunId, setOpenRunId] = useState<Id<"runs"> | null>(null);
 
   return (
     <section className="feed">
       <div className="feed-head">
-        <h2>Activity</h2>
+        <h2>Agent activity</h2>
         <SimulateCrashButton />
       </div>
       <ul>
@@ -33,7 +32,7 @@ export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
 
 function describe(run: Doc<"runs">): { icon: string; tone: string; text: string } {
   if (run.status === "running") {
-    return { icon: "◌", tone: "idle", text: `Checking ${run.itemsTotal} sites…` };
+    return { icon: "◌", tone: "idle", text: `Checking rankings for ${run.itemsTotal} keywords…` };
   }
   if (run.status === "failed") {
     const crashed = run.itemsCompleted < run.itemsTotal;
@@ -41,7 +40,7 @@ function describe(run: Doc<"runs">): { icon: string; tone: string; text: string 
       icon: "✕",
       tone: "bad",
       text: crashed
-        ? `Check crashed partway (${run.itemsCompleted} of ${run.itemsTotal} sites done) — nothing lost, the next check healed itself`
+        ? `Check crashed partway (${run.itemsCompleted} of ${run.itemsTotal} keywords done) — nothing lost, the next check healed itself`
         : `Check failed — ${run.error ?? "unknown error"}`,
     };
   }
@@ -49,13 +48,13 @@ function describe(run: Doc<"runs">): { icon: string; tone: string; text: string 
     return {
       icon: "Δ",
       tone: "warn",
-      text: `Checked ${run.itemsCompleted} sites — ${run.changesCount} ${run.changesCount === 1 ? "change" : "changes"} since last time`,
+      text: `Checked ${run.itemsCompleted} keywords — ${run.changesCount} ranking ${run.changesCount === 1 ? "change" : "changes"}`,
     };
   }
   return {
     icon: "✓",
     tone: "good",
-    text: `Checked ${run.itemsCompleted} sites — no changes`,
+    text: `Checked ${run.itemsCompleted} keywords — rankings steady`,
   };
 }
 
@@ -77,6 +76,7 @@ function FeedItem({
         <span className="feed-text">{text}</span>
         <span className="feed-meta">
           {run.trigger === "cron" ? "auto" : "manual"}
+          {run.source === "simulated" && " · demo data"}
           {run.finishedAt && <> · {formatDuration(run.finishedAt - run.startedAt)}</>}
         </span>
         <span className="feed-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
@@ -97,16 +97,30 @@ function FeedDetail({ runId }: { runId: Id<"runs"> }) {
       )}
       <table>
         <tbody>
-          {data.checks.map((check) => (
-            <tr key={check._id}>
-              <td className="url">{hostOf(check.url)}</td>
-              <td><CheckStatusPill check={check} /></td>
-              <td className="num">{check.latencyMs !== undefined ? `${check.latencyMs}ms` : "—"}</td>
-              <td><ChangePill change={check.change} /></td>
-            </tr>
-          ))}
-          {data.checks.length === 0 && (
-            <tr><td className="quiet">It stopped before reaching any site.</td></tr>
+          {data.keywordChecks.map((row) => {
+            const you = row.positions.find((p) => p.isBusiness);
+            return (
+              <tr key={row._id}>
+                <td className="url">“{row.keyword}”</td>
+                <td>
+                  {row.error ? (
+                    <span className="pill pill-critical" title={row.error}>✕ fetch failed</span>
+                  ) : you?.position !== undefined ? (
+                    <span className="pill pill-good">you #{you.position}</span>
+                  ) : (
+                    <span className="pill pill-warning">not in top 20</span>
+                  )}
+                </td>
+                <td className="num">
+                  {row.changes.length > 0
+                    ? `${row.changes.length} ${row.changes.length === 1 ? "change" : "changes"}`
+                    : "—"}
+                </td>
+              </tr>
+            );
+          })}
+          {data.keywordChecks.length === 0 && (
+            <tr><td className="quiet">It stopped before checking any keyword.</td></tr>
           )}
         </tbody>
       </table>

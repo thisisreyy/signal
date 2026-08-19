@@ -4,9 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-01-01",
   "triggers": {
-    // Every 5 minutes. The runKey derived from the scheduled time makes
-    // duplicate deliveries of a tick idempotent.
-    "crons": ["*/5 * * * *"]
+    // Daily at 06:00 UTC — rankings move on a daily timescale, and this
+    // keeps Serper usage at keywords × 1 query per day. The runKey derived
+    // from the scheduled time makes duplicate deliveries of a tick idempotent.
+    "crons": ["0 6 * * *"]
   },
   "vars": {
     // Overridden locally by .dev.vars; set to the real deployment URL

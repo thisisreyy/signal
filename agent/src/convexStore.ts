@@ -1,8 +1,7 @@
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
-import type { CheckResult } from "./checker";
-import type { BaselineEntry, Change } from "./diff";
+import type { DomainPosition, GrowthConfig, KeywordCheckResult } from "./growth/types";
 import type { RunStore } from "./store";
 
 /**
@@ -25,40 +24,41 @@ export class ConvexRunStore implements RunStore {
     return state.paused;
   }
 
-  async getConfig(): Promise<{ urls: string[]; injectFailure: boolean }> {
-    return await this.client.query(api.admin.getConfig, {});
+  async getConfig(): Promise<GrowthConfig> {
+    const config = await this.client.query(api.admin.getConfig, {});
+    return {
+      business: config.business,
+      keywords: config.keywords,
+      competitors: config.competitors,
+      injectFailure: config.injectFailure,
+    };
   }
 
   async startRun(args: {
     runKey: string;
     trigger: "cron" | "manual";
     itemsTotal: number;
+    source: string;
   }): Promise<{ runId: string; created: boolean }> {
     return await this.client.mutation(api.runs.start, args);
   }
 
-  async getBaseline(): Promise<Record<string, BaselineEntry>> {
+  async getBaseline(): Promise<Record<string, DomainPosition[]>> {
     const entries = await this.client.query(api.runs.baseline, {});
-    const baseline: Record<string, BaselineEntry> = {};
+    const baseline: Record<string, DomainPosition[]> = {};
     for (const entry of entries) {
-      baseline[entry.url] = { ok: entry.ok, statusCode: entry.statusCode };
+      baseline[entry.keyword] = entry.positions;
     }
     return baseline;
   }
 
-  async recordCheck(
-    runId: string,
-    result: CheckResult,
-    change: Change | undefined,
-  ): Promise<void> {
-    await this.client.mutation(api.checks.record, {
+  async recordKeywordCheck(runId: string, result: KeywordCheckResult): Promise<void> {
+    await this.client.mutation(api.keywordChecks.record, {
       runId: runId as Id<"runs">,
-      url: result.url,
-      ok: result.ok,
-      statusCode: result.statusCode,
-      latencyMs: result.latencyMs,
+      keyword: result.keyword,
       error: result.error,
-      change,
+      positions: result.positions,
+      changes: result.changes,
     });
   }
 

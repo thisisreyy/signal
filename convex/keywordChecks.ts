@@ -56,6 +56,46 @@ export const byRun = query({
   },
 });
 
+/**
+ * The signals feed: every detected change from recent finished runs,
+ * newest first, with enough context to phrase a human-readable sentence.
+ */
+export const signals = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const recentRuns = await ctx.db
+      .query("runs")
+      .withIndex("by_startedAt")
+      .order("desc")
+      .take(20);
+    const signals: {
+      at: number;
+      runId: string;
+      keyword: string;
+      change: (typeof rankChange)["type"];
+    }[] = [];
+    for (const run of recentRuns) {
+      if (run.changesCount === 0) continue;
+      const rows = await ctx.db
+        .query("keywordChecks")
+        .withIndex("by_run_keyword", (q) => q.eq("runId", run._id))
+        .collect();
+      for (const row of rows) {
+        for (const change of row.changes) {
+          signals.push({
+            at: row.checkedAt,
+            runId: run._id,
+            keyword: row.keyword,
+            change,
+          });
+        }
+      }
+    }
+    signals.sort((a, b) => b.at - a.at);
+    return signals.slice(0, args.limit ?? 30);
+  },
+});
+
 /** Recent history for one keyword, oldest first — the ranking timeline. */
 export const history = query({
   args: { keyword: v.string(), limit: v.optional(v.number()) },

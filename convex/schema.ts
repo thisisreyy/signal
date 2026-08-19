@@ -9,18 +9,6 @@ export const runStatus = v.union(
 
 export const trigger = v.union(v.literal("cron"), v.literal("manual"));
 
-// Present on a check only when its outcome differs from the last successful run.
-export const change = v.object({
-  kind: v.union(
-    v.literal("new"), // URL not present in the baseline run
-    v.literal("broke"), // ok -> not ok
-    v.literal("recovered"), // not ok -> ok
-    v.literal("statusChanged"), // ok both times, different status code
-  ),
-  prevOk: v.optional(v.boolean()),
-  prevStatusCode: v.optional(v.number()),
-});
-
 /** One tracked domain's position in a keyword's search results. */
 export const domainPosition = v.object({
   domain: v.string(),
@@ -50,6 +38,8 @@ export default defineSchema({
   runs: defineTable({
     runKey: v.string(),
     trigger,
+    // Which data source produced this run ("serper" | "simulated").
+    source: v.optional(v.string()),
     status: runStatus,
     startedAt: v.number(),
     finishedAt: v.optional(v.number()),
@@ -62,22 +52,6 @@ export default defineSchema({
   })
     .index("by_runKey", ["runKey"])
     .index("by_startedAt", ["startedAt"]),
-
-  // One document per (run, URL) result, written as each check completes so a
-  // partially failed run still leaves durable, consistent rows.
-  checks: defineTable({
-    runId: v.id("runs"),
-    url: v.string(),
-    ok: v.boolean(),
-    statusCode: v.optional(v.number()),
-    latencyMs: v.optional(v.number()),
-    error: v.optional(v.string()),
-    checkedAt: v.number(),
-    change: v.optional(change),
-  })
-    .index("by_run_url", ["runId", "url"])
-    // Per-site history for the dashboard's site cards.
-    .index("by_url", ["url"]),
 
   // Singleton checkpoint. lastSuccessfulRunId only advances on success, so a
   // failed run can never corrupt the diff baseline.
@@ -106,8 +80,6 @@ export default defineSchema({
   // there is one source of truth.
   config: defineTable({
     key: v.literal("singleton"),
-    // Legacy URL-checker job config; retired with the growth task.
-    urls: v.optional(v.array(v.string())),
     // Growth agent config.
     business: v.optional(v.object({ name: v.string(), domain: v.string() })),
     keywords: v.optional(v.array(v.string())),

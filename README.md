@@ -1,26 +1,30 @@
-# Signal
+# Signal — an autonomous growth agent
 
-A reliable long-running agent with durable memory and a live dashboard.
+A small, reliable growth agent: on a daily schedule it checks where your
+business ranks on Google for a set of target keywords, where your competitors
+rank for the same keywords, detects what changed ("dropped from #4 to #7 for
+'ai recruiting tool'", "openai.com overtook you for 'llm api'"), and shows it
+all on a live dashboard.
 
-The agent's task is deliberately simple — check the HTTP status and response
-time of a configurable URL list on a schedule — because the point of this
-project is not the task. The point is the reliability architecture around it:
-every run is durable, idempotent, recoverable, observable, and controllable.
+The task is growth/SEO monitoring, but the engineering point is **reliability**:
+every run is durable, idempotent, recoverable, and observable. The agent can
+crash mid-run, get triggered twice, or lose its data source, and state never
+corrupts.
 
 ## Architecture
 
 ```
-  cron (*/5)  ──▶ ┌─────────────────────────────┐
-  POST /trigger ─▶│  Cloudflare Worker          │  stateless runtime
-                  │  └─ @signal/agent (pure TS) │  also serves the built
-                  └────────────┬────────────────┘  dashboard as assets
-                               │  queries/mutations (HTTPS)
+  cron (daily) ─▶ ┌─────────────────────────────┐     ┌──────────────┐
+  POST /trigger ─▶│  Cloudflare Worker          │────▶│ RankingSource │ swappable:
+                  │  └─ @signal/agent (pure TS) │     │  serper.dev   │ real Google
+                  └────────────┬────────────────┘     │  simulated    │ demo/tests
+                               │  queries/mutations   └──────────────┘
                                ▼
                   ┌─────────────────────────────┐
                   │  Convex                     │  all durable state
-                  │  runs · checks              │  run history
+                  │  runs · keywordChecks       │  run history + rankings
                   │  agentState                 │  checkpoint + pause flag
-                  │  config                     │  URL list + failure switch
+                  │  config                     │  business/keywords/competitors
                   └────────────┬────────────────┘
                                │  reactive subscription (WebSocket)
                                ▼
@@ -29,80 +33,84 @@ every run is durable, idempotent, recoverable, observable, and controllable.
                   └─────────────────────────────┘
 ```
 
-Three packages plus the Convex backend, all TypeScript, all run with Bun:
+| Path         | What it is                                                              |
+| ------------ | ----------------------------------------------------------------------- |
+| `agent/`     | The growth task as a pure, tested library: sources, extraction, change detection, run orchestration |
+| `convex/`    | Schema and functions — the only place durable state is touched          |
+| `worker/`    | Cloudflare Worker: daily cron, `POST /trigger`, serves the dashboard    |
+| `dashboard/` | React UI reading Convex reactively                                      |
 
-| Path         | What it is                                                        |
-| ------------ | ----------------------------------------------------------------- |
-| `agent/`     | The task + run orchestration as a pure, tested library            |
-| `convex/`    | Schema and functions — the only place durable state is touched    |
-| `worker/`    | Cloudflare Worker: cron trigger, `POST /trigger`, dashboard host  |
-| `dashboard/` | React UI reading Convex reactively                                |
+The Worker is stateless and replaceable; every durable effect is a Convex
+mutation with transactional semantics.
 
-The Worker is deliberately stateless and replaceable; if it is evicted, killed,
-or double-invoked, no state is lost or corrupted, because every durable effect
-is a Convex mutation with transactional semantics.
+## The data source (and why it's swappable)
 
-## The five reliability guarantees, and where they are enforced
+Real ranking data is the fragile part, so it lives behind one interface
+(`agent/src/ranking/source.ts`): `search(keyword) → ordered results`. Two
+implementations ship:
 
-**1. Durable memory.** Every run is a `runs` document; every URL result is a
-`checks` document written *the moment the check completes*
-(`agent/src/runner.ts`, loop in `executeRun`). Nothing is buffered until the
-end of a run, so a crash can lose at most the single in-flight check. The
-"last known good" state is a checkpoint (`agentState.lastSuccessfulRunId`),
-not a cache — it survives worker restarts, deploys, and failures.
+- **serper.dev** (`SerperSource`) — real Google results. Chosen because a
+  growth agent's product *is* Google positions, the API is a clean JSON POST
+  that works from Workers, and the free tier (2,500 credits, one-time) lasts
+  ~2 years at this project's default usage. Honest risks: credits don't renew
+  (after that it's paid), and the key is a secret to manage. Activated simply
+  by setting `SERPER_API_KEY`.
+- **simulated** (`SimulatedSource`) — deterministic fabricated rankings that
+  drift over time. Used by unit tests and as the no-key demo mode; the
+  dashboard labels it "demo data". This is not a platform mock — Convex and
+  the Worker are always real — it's the swappability requirement doing its job.
 
-**2. Recovery.** Two mechanisms, both in `convex/runs.ts`:
+Cost model: **one query per keyword per run**, independent of competitor
+count — a single top-20 fetch is scanned for the business *and* every
+competitor. Daily cadence × 3 keywords ≈ 90 queries/month. A single keyword's
+fetch failure is recorded as data on that keyword (and excluded from future
+diff baselines); only *all* keywords failing fails the run.
 
-- The checkpoint only advances inside the `finish` mutation and only when
-  `status === "succeeded"` — and it advances in the *same transaction* that
-  marks the run succeeded, so "run succeeded" and "checkpoint moved" can never
-  be observed apart. A run that fails partway keeps its partial results (they
-  are real observations) but can never become the diff baseline; the next run
-  diffs against the last *successful* run as if the failed run never happened.
-- The `recoverStale` sweep runs at the start of every run: any run still
-  `"running"` after 10 minutes crashed without finalizing (worker eviction,
-  network loss mid-run) and is marked `failed` so history stays honest and
-  nothing ever waits on a phantom run.
+## The reliability guarantees, and where they are enforced
 
-**3. Idempotency.** Every run has a `runKey`. Cron runs derive it from the
-scheduled tick time (`worker/src/index.ts:cronRunKey`), and the dashboard
-generates one UUID per click, so retries reuse the same key. The `runs.start`
-mutation does check-then-insert on an index over `runKey` — and because Convex
-mutations are serializable transactions, a double trigger cannot race: the
-second caller gets `created: false` and `executeRun` returns without doing any
-work. This is enforced in the database, not in the runtime, so it holds even
-across two workers triggering concurrently.
+**Durable memory.** Each keyword's result is written to `keywordChecks` the
+moment its SERP fetch completes (`agent/src/runner.ts`) — nothing is buffered
+until run end, so a crash loses at most one in-flight keyword. History is
+never rewritten; every run's positions and detected changes are immutable
+records of what the agent saw.
 
-**4. Observability.** The dashboard subscribes to Convex queries
-(`runs.list`, `runs.get`, `admin.state`) over a WebSocket — no polling. Every
-run shows its status, trigger source, per-URL status/latency/error, progress
-(`urlsCompleted/urlsTotal` makes partial failure visible as e.g. "1/3"), and
-what changed vs. the last successful run. Diffs are computed at write time and
-stored on the check row, so history is immutable and self-describing.
+**Idempotency.** Every run has a `runKey` — derived from the scheduled tick
+for cron, one UUID per click for manual. `runs.start` (`convex/runs.ts`) does
+check-then-insert on an index over `runKey`, and Convex mutations are
+serializable transactions, so a double trigger cannot race: the second caller
+gets `created: false` and does no work. Enforced in the database, not the
+runtime.
 
-**5. Safe intervention.** Pause/resume flips `agentState.paused`; the runner
-checks it before claiming a run, so pausing can never interrupt a run halfway —
-it only prevents new ones. Manual trigger goes through exactly the same
-`executeRun` path as cron, with the same idempotency, so an operator clicking
-"Run now" during a cron tick cannot cause double-processing.
+**Recovery.** Two mechanisms in `convex/runs.ts`:
+- The checkpoint (`agentState.lastSuccessfulRunId`) advances only inside the
+  `finish` mutation, only on success, in the same transaction that marks the
+  run succeeded. A failed run keeps its partial keyword rows (real
+  observations) but can never become the diff baseline — the next run diffs
+  against the last *successful* run as if the failure never happened.
+- A `recoverStale` sweep at the start of every run marks runs stuck in
+  "running" for 10+ minutes (worker eviction, network loss) as failed, so
+  history stays honest.
 
-### The failure-injection proof
+**Observability.** The dashboard subscribes to Convex over WebSocket: current
+position per keyword with competitor comparison, position-over-time
+sparklines, a plain-English signals feed of every detected change, and the
+full run history with per-keyword detail and progress (a crashed run shows
+"1 of 3 keywords done"). Diffs are computed at write time and stored, so
+history is self-describing.
 
-Flip **Inject failure** in the dashboard (or
-`bun x convex run admin:setInjectFailure '{"injectFailure": true}'`) and
-trigger a run. The runner throws deliberately after recording roughly half the
-checks (`agent/src/runner.ts:InjectedFailureError`). You will see, live:
+**Safe intervention.** Pause flips a flag the runner checks *before* claiming
+a run — pausing can never interrupt one halfway. Manual triggers use exactly
+the cron path with the same idempotency. The "Simulate a crash" button arms a
+failure flag, triggers a run that deliberately throws midway, and disarms —
+the feed then shows the crash and the self-heal.
 
-1. The run turns `failed` with partial results (e.g. 1/3 URLs) — kept, not
-   rolled back, clearly marked.
-2. The checkpoint does not move (`admin:state` still points at the previous
-   successful run).
-3. Untoggle and run again: the new run succeeds, diffs against the last
-   *successful* run — the failed run is transparent to diffing — and the
-   checkpoint advances.
+### Change detection (the brain)
 
-The same scenario is pinned down in `agent/test/runner.test.ts`
-("injected mid-run failure…" and "recovery: the run after a failure…").
+`agent/src/growth/detect.ts`, pure and unit-tested: per-domain
+`entered` / `dropped_out` of the top 20, `moved` only when |Δ| ≥ 2 (±1 jitter
+stays quiet), and business-vs-competitor order flips (`overtaken`/`overtook`)
+ignoring competitors that never rank. A keyword with no baseline (first run,
+newly added) produces no changes — a day-one flood of "entered" is noise.
 
 ## Running locally
 
@@ -110,84 +118,70 @@ Prereqs: [Bun](https://bun.sh) ≥ 1.3, Node ≥ 22 (wrangler runs on Node).
 
 ```sh
 bun install
-bun test                # 15 unit tests (checker, diffing, runner guarantees)
+bun test              # 21 unit tests: sources, extraction, detection, runner guarantees
 bun run typecheck
 
-# Terminal 1 — Convex (local dev deployment; add `--local` to stay anonymous)
-bun run dev:convex
-
-# Terminal 2 — Worker on :8787 (cron simulation + trigger endpoint + dashboard)
-bun run dev:worker
-
-# Terminal 3 — dashboard with hot reload on :5173 (optional; :8787 serves the
-# last built dashboard already)
-bun run dev:dashboard
+bun run dev:convex    # terminal 1 — local Convex deployment
+bun run dev:worker    # terminal 2 — Worker on :8787 (also serves built dashboard)
+bun run dev:dashboard # terminal 3 — hot-reload dashboard on :5173 (optional)
 ```
 
-Local env files (created by the tools, or copy these):
+Local env: `.env.local` (written by `convex dev`) and `worker/.dev.vars` with
+`CONVEX_URL=http://127.0.0.1:3210`; add `SERPER_API_KEY=...` to `.dev.vars`
+for real Google data locally.
 
-- `.env.local` — written by `convex dev`; `CONVEX_URL=http://127.0.0.1:3210`
-- `worker/.dev.vars` — `CONVEX_URL=http://127.0.0.1:3210`
-- `dashboard/.env.local` — `VITE_CONVEX_URL=http://127.0.0.1:3210` and
-  `VITE_WORKER_URL=http://localhost:8787`
-
-Simulate a cron tick locally:
-`curl "http://localhost:8787/__scheduled?cron=*/5+*+*+*+*"`.
-Trigger manually: `curl -X POST http://localhost:8787/trigger`.
-Run the agent without the worker: `cd agent && CONVEX_URL=http://127.0.0.1:3210 bun run src/cli.ts`.
+Useful:
+- Simulate the daily cron tick: `curl "http://localhost:8787/__scheduled?cron=0+6+*+*+*"`
+- Manual run: `curl -X POST http://localhost:8787/trigger`
+- CLI run without the worker: `cd agent && CONVEX_URL=http://127.0.0.1:3210 bun run src/cli.ts`
+  (`SIM_BUCKET_MS=60000` makes the simulated source drift fast enough to see
+  changes between back-to-back runs)
 
 ## Deploying
-
-One-time logins, then one script:
 
 ```sh
 bun x convex login
 cd worker && bun x wrangler login && cd ..
 bun run deploy
+# then, for real Google data:
+cd worker && bun x wrangler secret put SERPER_API_KEY
 ```
 
-`scripts/deploy.sh` deploys Convex to a production deployment, builds the
-dashboard with `VITE_CONVEX_URL` pointed at it, and deploys the Worker (cron
-trigger + `/trigger` endpoint + dashboard assets) with `CONVEX_URL` set to the
-same deployment. The workers.dev URL it prints is the live dashboard. The cron
-schedule lives in `worker/wrangler.jsonc` (`*/5 * * * *`).
+`scripts/deploy.sh` deploys Convex to production, builds the dashboard
+against the production URL, and deploys the Worker (daily cron + `/trigger` +
+dashboard assets). The workers.dev URL it prints is the live dashboard. The
+schedule lives in `worker/wrangler.jsonc`.
 
 ## Design decisions
 
-**Checks are rows, not an array on the run.** The tempting model — a run
-document with a `results[]` array — cannot express "the run died halfway"
-without either losing the partial work or rewriting the whole document per
-URL. One row per (run, URL), written as each check completes, makes partial
-progress durable for free, gives the dashboard per-check reactivity, and
-avoids unbounded document growth. The `(runId, url)` index doubles as the
-upsert key, so re-recording a check is idempotent too.
+**One SERP query serves everyone.** Rankings for the business and all
+competitors come from scanning a single result page per keyword. Cost scales
+with keywords, never with competitors — which is what makes a free tier last
+years instead of weeks.
+
+**Keyword results are rows, not an array on the run.** One row per
+(run × keyword), written as completed, is what makes partial progress durable
+and recovery trivial — the same modelling that carried the original URL
+checker, deliberately preserved.
 
 **The checkpoint is not "the previous run".** Diffing against "the previous
-run" breaks the moment a run fails: you'd diff against garbage or nothing.
-`lastSuccessfulRunId` is a separate, deliberately boring pointer that only the
-success path can move. Failed runs stay in history for humans but are
+run" breaks the moment one fails. `lastSuccessfulRunId` is a boring pointer
+only the success path can move; failed runs stay visible to humans and
 invisible to the diffing machinery.
 
-**Idempotency is the database's job.** The worker could try to dedupe in
-memory, but workers are stateless and can run concurrently — memory is the
-wrong place. A transactional insert-if-absent on `runKey` in Convex is ~10
-lines and holds under every interleaving. Deriving cron keys from the
-scheduled time (rather than "now") means even a delayed redelivery of the same
-tick dedupes correctly.
+**Changes are computed at write time and stored.** A dashboard-side diff
+would silently recompute history whenever config changes. Stored changes make
+each run a self-contained record — what you want when reading an incident
+three days later.
 
-**Diffs are computed at write time.** Computing "what changed" in a dashboard
-query would be cheaper to write, but it makes history mutable — edit the URL
-list and old diffs silently recompute differently. Stored diffs make each run
-a self-contained record of what the agent believed at the time, which is what
-you want when you're debugging an incident three days later.
+**Errored keyword rows are excluded from baselines.** A rate-limited fetch
+recorded as "no positions" would fabricate a "dropped out of top 20" signal
+next run. Excluding errored rows from the baseline means transient
+infrastructure failures can never masquerade as ranking movement.
 
-**The worker serves the dashboard.** Not essential, but it collapses deploy
-surface area: one `wrangler deploy` gives one URL for UI + API + cron, and the
-dashboard can call `/trigger` same-origin. The UI still talks to Convex
-directly over its own WebSocket; the worker is not a proxy in that path.
+**First sighting is silent.** No baseline → no changes. The alternative — a
+wall of "entered top 20" on day one — teaches users to ignore the feed.
 
-**Pause blocks claiming, not execution.** Checking `paused` once before
-`startRun` (rather than between URLs) means a pause can never leave a run
-half-finished. The trade-off — a pause during a run doesn't stop that run —
-is the safer default: runs take seconds, and "no run is ever interrupted" is
-a much easier invariant to reason about than resumable interruption.
+**The worker serves the dashboard.** One `wrangler deploy` gives one URL for
+UI + API + cron. The UI still talks to Convex directly over its own
+WebSocket; the worker is not a proxy in that path.

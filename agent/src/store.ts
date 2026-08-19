@@ -1,5 +1,4 @@
-import type { CheckResult } from "./checker";
-import type { BaselineEntry, Change } from "./diff";
+import type { DomainPosition, GrowthConfig, KeywordCheckResult } from "./growth/types";
 
 /**
  * Everything the runner needs from durable storage, as a narrow interface.
@@ -11,20 +10,21 @@ export interface RunStore {
   /** Mark crashed runs (stuck in "running") as failed. Returns count. */
   recoverStaleRuns(): Promise<number>;
   isPaused(): Promise<boolean>;
-  getConfig(): Promise<{ urls: string[]; injectFailure: boolean }>;
+  getConfig(): Promise<GrowthConfig>;
   /** Idempotent: a duplicate runKey returns the existing run, created=false. */
   startRun(args: {
     runKey: string;
     trigger: "cron" | "manual";
     itemsTotal: number;
+    source: string;
   }): Promise<{ runId: string; created: boolean }>;
-  /** Per-URL results from the last successful run, keyed by URL. */
-  getBaseline(): Promise<Record<string, BaselineEntry>>;
-  recordCheck(
-    runId: string,
-    result: CheckResult,
-    change: Change | undefined,
-  ): Promise<void>;
+  /**
+   * Per-keyword positions from the last successful run, keyed by keyword.
+   * Keyword rows that errored are excluded, so a transient fetch failure can
+   * never masquerade as "everyone dropped out".
+   */
+  getBaseline(): Promise<Record<string, DomainPosition[]>>;
+  recordKeywordCheck(runId: string, result: KeywordCheckResult): Promise<void>;
   /** On "succeeded", the store must also advance the checkpoint. */
   finishRun(
     runId: string,

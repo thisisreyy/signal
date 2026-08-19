@@ -9,11 +9,14 @@ export function Sparkline({
   formatValue,
   width = 120,
   height = 36,
+  invert = false,
 }: {
   points: { label: string; value: number }[];
   formatValue: (value: number) => string;
   width?: number;
   height?: number;
+  /** For ranks: lower value = better = drawn higher. */
+  invert?: boolean;
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -25,7 +28,10 @@ export function Sparkline({
   const min = Math.min(...points.map((p) => p.value));
   const span = max - min || 1;
   const x = (i: number) => pad + (i * (width - pad * 2)) / (points.length - 1);
-  const y = (v: number) => pad + (1 - (v - min) / span) * (height - pad * 2);
+  const y = (v: number) => {
+    const t = (v - min) / span;
+    return pad + (invert ? t : 1 - t) * (height - pad * 2);
+  };
   const path = points
     .map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`)
     .join(" ");
