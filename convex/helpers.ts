@@ -1,10 +1,10 @@
 import type { MutationCtx, QueryCtx } from "./_generated/server";
 
-// Demo growth config — a real business with real, competitive SERPs, so the
-// agent produces meaningful data before the user customizes anything.
-export const DEFAULT_BUSINESS = { name: "Anthropic", domain: "anthropic.com" };
-export const DEFAULT_KEYWORDS = ["ai assistant", "llm api", "ai coding agent"];
-export const DEFAULT_COMPETITORS = ["openai.com", "google.com", "mistral.ai"];
+// Demo growth config — chosen so tracked domains genuinely appear in these
+// keywords' results, giving meaningful data before the user customizes it.
+export const DEFAULT_BUSINESS = { name: "Claude", domain: "claude.ai" };
+export const DEFAULT_KEYWORDS = ["claude ai", "gpt 4 alternative", "ai coding agent"];
+export const DEFAULT_COMPETITORS = ["openai.com", "cursor.com", "google.com"];
 
 export async function getAgentState(ctx: QueryCtx) {
   return await ctx.db
