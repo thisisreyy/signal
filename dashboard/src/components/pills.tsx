@@ -4,29 +4,6 @@ import type { Doc } from "../../../convex/_generated/dataModel";
  * Status is never color alone: every pill pairs an icon glyph with a label,
  * per the status-palette rule.
  */
-export function StatusPill({ status }: { status: Doc<"runs">["status"] }) {
-  switch (status) {
-    case "succeeded":
-      return (
-        <span className="pill pill-good">
-          <span className="pill-icon">✓</span> ok
-        </span>
-      );
-    case "failed":
-      return (
-        <span className="pill pill-critical">
-          <span className="pill-icon">✕</span> failed
-        </span>
-      );
-    case "running":
-      return (
-        <span className="pill pill-running">
-          <span className="pill-icon pulse">●</span> running
-        </span>
-      );
-  }
-}
-
 export function CheckStatusPill({
   check,
 }: {
@@ -56,19 +33,19 @@ export function ChangePill({ change }: { change?: Doc<"checks">["change"] }) {
     case "new":
       return (
         <span className="pill pill-new">
-          <span className="pill-icon">＋</span> new URL
+          <span className="pill-icon">＋</span> newly watched
         </span>
       );
     case "broke":
       return (
         <span className="pill pill-critical">
-          <span className="pill-icon">▼</span> broke · was {change.prevStatusCode ?? "ok"}
+          <span className="pill-icon">▼</span> went down · was {change.prevStatusCode ?? "up"}
         </span>
       );
     case "recovered":
       return (
         <span className="pill pill-good">
-          <span className="pill-icon">▲</span> recovered · was {change.prevStatusCode ?? "down"}
+          <span className="pill-icon">▲</span> back up
         </span>
       );
     case "statusChanged":

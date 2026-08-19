@@ -49,7 +49,10 @@ export default defineSchema({
     error: v.optional(v.string()),
     checkedAt: v.number(),
     change: v.optional(change),
-  }).index("by_run_url", ["runId", "url"]),
+  })
+    .index("by_run_url", ["runId", "url"])
+    // Per-site history for the dashboard's site cards.
+    .index("by_url", ["url"]),
 
   // Singleton checkpoint. lastSuccessfulRunId only advances on success, so a
   // failed run can never corrupt the diff baseline.

@@ -1,45 +1,82 @@
 import { useState } from "react";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
-import { Header } from "./components/Header";
-import { StatTiles } from "./components/StatTiles";
-import { RunList } from "./components/RunList";
-import { RunDetail } from "./components/RunDetail";
+import { ActivityFeed } from "./components/ActivityFeed";
+import { Hero } from "./components/Hero";
+import { AddSiteCard, SiteCard } from "./components/SiteCard";
+import { triggerCheck, useNowTick } from "./lib";
 
 export default function App() {
-  const runs = useQuery(api.runs.list, { limit: 50 });
+  const sites = useQuery(api.admin.sites, {});
+  const runs = useQuery(api.runs.list, { limit: 30 });
   const state = useQuery(api.admin.state, {});
-  const config = useQuery(api.admin.getConfig, {});
-  const [selectedRunId, setSelectedRunId] = useState<Id<"runs"> | null>(null);
+  const setPaused = useMutation(api.admin.setPaused);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  useNowTick();
 
-  if (runs === undefined || state === undefined || config === undefined) {
+  if (sites === undefined || runs === undefined || state === undefined) {
     return (
       <div className="loading">
-        <span className="logo-dot logo-live" /> Connecting to Convex…
+        <span className="hero-dot hero-dot-good" /> Waking up…
       </div>
     );
   }
 
-  const activeRunId = selectedRunId ?? runs[0]?._id ?? null;
+  async function checkNow() {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      await triggerCheck();
+    } catch (error) {
+      setCheckError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChecking(false);
+    }
+  }
 
   return (
     <div className="app">
-      <Header state={state} config={config} />
-      <StatTiles runs={runs} lastSuccessfulAt={state.lastSuccessfulAt} />
-      <main className="columns">
-        <RunList runs={runs} activeRunId={activeRunId} onSelect={setSelectedRunId} />
-        {activeRunId ? (
-          <RunDetail runId={activeRunId} />
-        ) : (
-          <section className="panel detail quiet">
-            No runs yet — press “Run now” or wait for the next cron tick.
-          </section>
-        )}
-      </main>
+      <header className="topbar">
+        <div className="brand">
+          <span className="logo" aria-hidden="true">
+            <span className={`logo-dot ${state.paused ? "logo-paused" : "logo-live"}`} />
+          </span>
+          <h1>Signal</h1>
+        </div>
+        <div className="controls">
+          {checkError && <span className="trigger-error" role="alert">✕ {checkError}</span>}
+          <label className="switch" title="Run a check automatically every 5 minutes">
+            <input
+              type="checkbox"
+              checked={!state.paused}
+              onChange={(e) => setPaused({ paused: !e.target.checked })}
+            />
+            <span className="switch-track" aria-hidden="true">
+              <span className="switch-thumb" />
+            </span>
+            Auto-check
+          </label>
+          <button className="btn btn-primary" onClick={checkNow} disabled={checking}>
+            {checking ? "Checking…" : "Check now"}
+          </button>
+        </div>
+      </header>
+
+      <Hero sites={sites} paused={state.paused} lastSuccessfulAt={state.lastSuccessfulAt} />
+
+      <section className="sites" aria-label="Watched sites">
+        {sites.map((site) => (
+          <SiteCard key={site.url} site={site} />
+        ))}
+        <AddSiteCard />
+      </section>
+
+      <ActivityFeed runs={runs} />
+
       <footer className="footer quiet">
-        Signal · durable, idempotent, recoverable URL monitoring on Convex +
-        Cloudflare Workers
+        Signal checks your sites on a schedule, remembers everything, and heals
+        itself when a check crashes.
       </footer>
     </div>
   );
