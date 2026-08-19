@@ -15,5 +15,12 @@
   },
   "observability": {
     "enabled": true
+  },
+  // The built dashboard is served by this same Worker, so one deploy gives
+  // one URL for UI + manual-trigger endpoint + cron. GETs matching a file
+  // serve the asset; everything else (POST /trigger, /health) hits the code.
+  "assets": {
+    "directory": "../dashboard/dist",
+    "not_found_handling": "single-page-application"
   }
 }

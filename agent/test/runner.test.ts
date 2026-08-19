@@ -6,11 +6,11 @@ import { FakeStore } from "./fakeStore";
 /** Checker options whose fetch serves canned statuses, no network. */
 function servingStatuses(statuses: Record<string, number>): CheckerOptions {
   return {
-    fetchImpl: (async (input: RequestInfo | URL) => {
+    fetchImpl: (async (input: unknown) => {
       const status = statuses[String(input)];
       if (status === undefined) throw new Error("ECONNREFUSED");
       return new Response("", { status });
-    }) as typeof fetch,
+    }) as unknown as typeof fetch,
   };
 }
 

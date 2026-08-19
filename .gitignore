@@ -5,3 +5,5 @@ dist/
 .DS_Store
 .wrangler/
 convex/_generated/
+.convex-prod-url
+.dev.vars

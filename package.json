@@ -9,7 +9,11 @@
   ],
   "scripts": {
     "dev:convex": "convex dev",
-    "typecheck": "tsc -p convex && bun run --filter '*' typecheck"
+    "dev:worker": "cd worker && bun x wrangler dev --test-scheduled",
+    "dev:dashboard": "cd dashboard && bun run dev",
+    "test": "cd agent && bun test",
+    "typecheck": "tsc -p convex && bun run --filter '*' typecheck",
+    "deploy": "./scripts/deploy.sh"
   },
   "dependencies": {
     "convex": "^1.28.0"

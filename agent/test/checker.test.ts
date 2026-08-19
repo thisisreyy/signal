@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { checkUrl } from "../src/checker";
 
 function fakeFetch(handler: (url: string) => Response | Promise<Response>) {
-  return (async (input: RequestInfo | URL) =>
-    handler(String(input))) as typeof fetch;
+  return (async (input: unknown) =>
+    handler(String(input))) as unknown as typeof fetch;
 }
 
 describe("checkUrl", () => {
@@ -35,7 +35,7 @@ describe("checkUrl", () => {
     const result = await checkUrl("https://a.test", {
       fetchImpl: (async () => {
         throw new Error("ECONNREFUSED");
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
     expect(result.ok).toBe(false);
     expect(result.statusCode).toBeUndefined();
@@ -43,12 +43,12 @@ describe("checkUrl", () => {
   });
 
   test("timeout is reported as such", async () => {
-    const hangingFetch = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    const hangingFetch = ((_input: unknown, init?: RequestInit) =>
       new Promise<Response>((_, reject) => {
         init?.signal?.addEventListener("abort", () =>
           reject(init.signal!.reason),
         );
-      })) as typeof fetch;
+      })) as unknown as typeof fetch;
     const result = await checkUrl("https://slow.test", {
       fetchImpl: hangingFetch,
       timeoutMs: 10,

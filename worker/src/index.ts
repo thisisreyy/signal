@@ -59,7 +59,7 @@ export default {
       return json({ runKey, outcome });
     }
 
-    if (request.method === "GET" && url.pathname === "/") {
+    if (request.method === "GET" && url.pathname === "/health") {
       return json({ service: "signal-worker", convex: env.CONVEX_URL });
     }
 

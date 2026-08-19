@@ -4,7 +4,9 @@ import { api } from "../../convex/_generated/api";
 import type { Doc, Id } from "../../convex/_generated/dataModel";
 import { formatAgo, formatDateTime, formatDuration, formatTime } from "./format";
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL as string;
+// In production the dashboard is served BY the worker, so relative URLs work;
+// in local dev Vite (5173) and wrangler (8787) are separate processes.
+const WORKER_URL = (import.meta.env.VITE_WORKER_URL as string | undefined) ?? "";
 
 export default function App() {
   const runs = useQuery(api.runs.list, { limit: 50 });
