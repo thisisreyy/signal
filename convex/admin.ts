@@ -32,7 +32,26 @@ export const getConfig = query({
   args: {},
   handler: async (ctx) => {
     const config = await getConfigDoc(ctx);
-    return { urls: config?.urls ?? DEFAULT_URLS };
+    return {
+      urls: config?.urls ?? DEFAULT_URLS,
+      injectFailure: config?.injectFailure ?? false,
+    };
+  },
+});
+
+export const setInjectFailure = mutation({
+  args: { injectFailure: v.boolean() },
+  handler: async (ctx, args) => {
+    const config = await getConfigDoc(ctx);
+    if (config) {
+      await ctx.db.patch(config._id, { injectFailure: args.injectFailure });
+    } else {
+      await ctx.db.insert("config", {
+        key: "singleton",
+        urls: DEFAULT_URLS,
+        injectFailure: args.injectFailure,
+      });
+    }
   },
 });
 

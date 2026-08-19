@@ -65,5 +65,7 @@ export default defineSchema({
   config: defineTable({
     key: v.literal("singleton"),
     urls: v.array(v.string()),
+    // Phase 6: when true, the agent throws mid-run to prove recovery works.
+    injectFailure: v.optional(v.boolean()),
   }).index("by_key", ["key"]),
 });

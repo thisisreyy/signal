@@ -5,5 +5,12 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260819.1",
+    "wrangler": "^4.124.0"
+  },
+  "dependencies": {
+    "@signal/agent": "workspace:*"
   }
 }
