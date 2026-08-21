@@ -1,5 +1,8 @@
 # Signal — an autonomous growth agent
 
+**Live demo:** https://signal-worker.reydev.workers.dev — running unattended on a
+daily cron with real Google data; try the "⚡ Simulate a crash" button.
+
 A small, reliable growth agent: on a daily schedule it checks where your
 business ranks on Google for a set of target keywords, where your competitors
 rank for the same keywords, detects what changed ("dropped from #4 to #7 for
