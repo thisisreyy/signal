@@ -1,10 +1,13 @@
+import { useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { formatAgo } from "../format";
+import { faviconOf } from "../lib";
 
 interface Signal {
   at: number;
   keyword: string;
+  business: string;
   change: {
     kind: "moved" | "entered" | "dropped_out" | "overtaken" | "overtook";
     domain: string;
@@ -14,23 +17,59 @@ interface Signal {
   };
 }
 
-/** Detected ranking changes as plain-English, business-centric sentences. */
+/**
+ * Detected ranking changes as plain-English sentences, grouped into one tab
+ * per tracked business — switching what the agent tracks starts a new tab,
+ * and past eras stay browsable.
+ */
 export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
-  const signals = useQuery(api.keywordChecks.signals, { limit: 25 });
+  const signals = useQuery(api.keywordChecks.signals, {}) as Signal[] | undefined;
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Tabs: current business first, then past eras by most recent signal.
+  const eras: string[] = [];
+  for (const signal of signals ?? []) {
+    if (!eras.includes(signal.business)) eras.push(signal.business);
+  }
+  if (!eras.includes(businessDomain)) eras.unshift(businessDomain);
+  else eras.sort((a, b) => (a === businessDomain ? -1 : b === businessDomain ? 1 : 0));
+
+  const active = selected && eras.includes(selected) ? selected : businessDomain;
+  const visible = (signals ?? []).filter((s) => s.business === active);
 
   return (
     <section className="panel-card">
       <h2>Signals</h2>
+
+      {eras.length > 1 && (
+        <div className="signal-tabs" role="tablist" aria-label="Tracked business">
+          {eras.map((era) => (
+            <button
+              key={era}
+              role="tab"
+              aria-selected={era === active}
+              className={`signal-tab ${era === active ? "active" : ""}`}
+              onClick={() => setSelected(era)}
+            >
+              <img src={faviconOf(`https://${era}`)} alt="" className="signal-tab-icon"
+                onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")} />
+              {era}
+              {era === businessDomain && <span className="signal-tab-now">now</span>}
+            </button>
+          ))}
+        </div>
+      )}
+
       {signals === undefined && <p className="quiet">Loading…</p>}
-      {signals && signals.length === 0 && (
+      {signals && visible.length === 0 && (
         <p className="quiet">
-          No ranking changes detected yet. Signals appear here when positions
-          move between checks.
+          No ranking changes for {active} yet. Signals appear here when
+          positions move between checks.
         </p>
       )}
       <ul className="signals">
-        {(signals ?? []).map((signal, index) => {
-          const { icon, tone, text } = phrase(signal as Signal, businessDomain);
+        {visible.map((signal, index) => {
+          const { icon, tone, text } = phrase(signal, active);
           return (
             <li key={index} className="signal-row">
               <span className={`feed-icon feed-icon-${tone}`}>{icon}</span>

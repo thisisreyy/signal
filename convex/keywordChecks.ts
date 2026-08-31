@@ -57,8 +57,11 @@ export const byRun = query({
 });
 
 /**
- * The signals feed: every detected change from recent finished runs,
- * newest first, with enough context to phrase a human-readable sentence.
+ * The signals feed: every detected change from recent finished runs, newest
+ * first, tagged with the business that was being tracked at the time — the
+ * row's positions record which domain was "the business" when it was written,
+ * so past eras (a previously tracked business) group correctly with no
+ * migration.
  */
 export const signals = query({
   args: { limit: v.optional(v.number()) },
@@ -67,11 +70,12 @@ export const signals = query({
       .query("runs")
       .withIndex("by_startedAt")
       .order("desc")
-      .take(20);
+      .take(100);
     const signals: {
       at: number;
       runId: string;
       keyword: string;
+      business: string;
       change: (typeof rankChange)["type"];
     }[] = [];
     for (const run of recentRuns) {
@@ -81,18 +85,21 @@ export const signals = query({
         .withIndex("by_run_keyword", (q) => q.eq("runId", run._id))
         .collect();
       for (const row of rows) {
+        const business = row.positions.find((p) => p.isBusiness)?.domain;
+        if (!business) continue;
         for (const change of row.changes) {
           signals.push({
             at: row.checkedAt,
             runId: run._id,
             keyword: row.keyword,
+            business,
             change,
           });
         }
       }
     }
     signals.sort((a, b) => b.at - a.at);
-    return signals.slice(0, args.limit ?? 30);
+    return signals.slice(0, args.limit ?? 100);
   },
 });
 
