@@ -478,7 +478,12 @@ h1, h2, h3, .hero-headline, .rank-big, .tile-value {
   padding: 12px 12px 8px;
 }
 .feed-head h2 { font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
-.feed ul { list-style: none; padding: 0; }
+.feed ul {
+  list-style: none;
+  padding: 0 6px 0 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
 .feed-empty { color: var(--muted); padding: 10px 14px 18px; }
 
 .feed-item { border-top: 1px dashed var(--hairline); }
