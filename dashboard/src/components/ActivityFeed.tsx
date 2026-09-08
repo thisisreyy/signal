@@ -19,11 +19,10 @@ export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
         <SimulateCrashButton />
       </div>
       <ul>
-        {runs.map((run, index) => (
+        {runs.map((run) => (
           <FeedItem
             key={run._id}
             run={run}
-            index={index}
             open={openRunId === run._id}
             onToggle={() => setOpenRunId(openRunId === run._id ? null : run._id)}
           />
@@ -64,12 +63,10 @@ function describe(run: Doc<"runs">): { icon: string; tone: string; text: string 
 
 function FeedItem({
   run,
-  index,
   open,
   onToggle,
 }: {
   run: Doc<"runs">;
-  index: number;
   open: boolean;
   onToggle: () => void;
 }) {
