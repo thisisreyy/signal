@@ -1,40 +1,21 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { motion, useScroll, useTransform } from "framer-motion";
+import { motion } from "framer-motion";
 import { api } from "../../convex/_generated/api";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { Hero } from "./components/Hero";
 import { KeywordCard } from "./components/KeywordCard";
-import { Observatory } from "./components/Observatory";
 import { SignalsFeed } from "./components/SignalsFeed";
 import { TrackingPanel } from "./components/TrackingPanel";
 import { useCalm } from "./components/motion";
 import { triggerCheck, useNowTick } from "./lib";
 
-/**
- * Restrained page depth: two fixed radial illuminations that drift a few
- * percent with scroll. Transform/opacity only, pointer-events none, and
- * fully static under reduced motion or on small screens.
- */
+/** Static, restrained page depth — two fixed radial illuminations. */
 function BackgroundDepth() {
-  const calm = useCalm();
-  const { scrollYProgress } = useScroll();
-  const yA = useTransform(scrollYProgress, (v) => `${-4 + v * 10}%`);
-  const yB = useTransform(scrollYProgress, (v) => `${4 - v * 10}%`);
-  const oA = useTransform(scrollYProgress, (v) => (v < 0.5 ? 1 - v * 0.8 : 0.6 + (v - 0.5) * 0.5));
-
-  if (calm) {
-    return (
-      <div className="bg-depth" aria-hidden="true">
-        <div className="bg-layer bg-a" />
-        <div className="bg-layer bg-b" />
-      </div>
-    );
-  }
   return (
     <div className="bg-depth" aria-hidden="true">
-      <motion.div className="bg-layer bg-a" style={{ y: yA, opacity: oA }} />
-      <motion.div className="bg-layer bg-b" style={{ y: yB }} />
+      <div className="bg-layer bg-a" />
+      <div className="bg-layer bg-b" />
     </div>
   );
 }
@@ -46,6 +27,7 @@ export default function App() {
   const setPaused = useMutation(api.admin.setPaused);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const calm = useCalm();
   useNowTick();
 
   if (runs === undefined || state === undefined || config === undefined) {
@@ -77,9 +59,15 @@ export default function App() {
       <div className="app">
         <header className="topbar">
           <div className="brand">
-            <span className="logo" aria-hidden="true">
+            <motion.span
+              className="logo"
+              aria-hidden="true"
+              initial={calm ? false : { scale: 0.6, opacity: 0, rotate: -12 }}
+              animate={{ scale: 1, opacity: 1, rotate: 0 }}
+              transition={{ type: "spring", stiffness: 210, damping: 16 }}
+            >
               <span className={`logo-dot ${state.paused ? "logo-paused" : "logo-live"}`} />
-            </span>
+            </motion.span>
             <h1>Signal</h1>
             {latestSource === "simulated" && (
               <span
@@ -117,15 +105,17 @@ export default function App() {
         />
 
         <section className="sites" aria-label="Tracked keywords">
-          {config.keywords.map((keyword, index) => (
-            <KeywordCard key={keyword} keyword={keyword} index={index} />
+          {config.keywords.map((keyword) => (
+            <KeywordCard key={keyword} keyword={keyword} />
           ))}
         </section>
 
-        <Observatory
-          left={<SignalsFeed businessDomain={config.business.domain} />}
-          right={<TrackingPanel config={config} />}
-        />
+        <section className="observatory">
+          <div className="obs-grid">
+            <SignalsFeed businessDomain={config.business.domain} />
+            <TrackingPanel config={config} />
+          </div>
+        </section>
 
         <ActivityFeed runs={runs} />
 

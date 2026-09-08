@@ -1,11 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { motion } from "framer-motion";
 import { api } from "../../../convex/_generated/api";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { formatDuration, formatTime } from "../format";
 import { triggerCheck } from "../lib";
-import { useCalm } from "./motion";
 
 /** Runs as plain sentences; click one to see the per-keyword details. */
 export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
@@ -76,17 +74,8 @@ function FeedItem({
   onToggle: () => void;
 }) {
   const { icon, tone, text } = describe(run);
-  const calm = useCalm();
-  const entrance = calm
-    ? {}
-    : {
-        initial: { opacity: 0, y: 6 },
-        whileInView: { opacity: 1, y: 0 },
-        viewport: { once: true },
-        transition: { duration: 0.35, delay: Math.min(index, 10) * 0.025 },
-      };
   return (
-    <motion.li className={`feed-item ${open ? "open" : ""}`} {...entrance}>
+    <li className={`feed-item ${open ? "open" : ""}`}>
       <button className="feed-row" onClick={onToggle} aria-expanded={open}>
         <span className="feed-time">{formatTime(run.startedAt)}</span>
         <span className={`feed-icon feed-icon-${tone}`}>{icon}</span>
@@ -99,7 +88,7 @@ function FeedItem({
         <span className="feed-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
       </button>
       {open && <FeedDetail runId={run._id} />}
-    </motion.li>
+    </li>
   );
 }
 

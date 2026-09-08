@@ -3,7 +3,6 @@ import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { formatAgo } from "../format";
 import { faviconOf } from "../lib";
-import { ProgressRow, useBandProgress } from "./Observatory";
 
 interface Signal {
   at: number;
@@ -26,7 +25,6 @@ interface Signal {
 export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
   const signals = useQuery(api.keywordChecks.signals, {}) as Signal[] | undefined;
   const [selected, setSelected] = useState<string | null>(null);
-  const progress = useBandProgress();
 
   // Tabs: current business first, then past eras by most recent signal.
   const eras: string[] = [];
@@ -81,14 +79,7 @@ export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
               <span className="signal-when">{formatAgo(signal.at)}</span>
             </>
           );
-          // The first rows reveal sequentially with the band's scroll
-          // progress; everything past the sequence shares the final slot so
-          // no later row is ever brighter than the ones still revealing.
-          return progress ? (
-            <ProgressRow key={`${active}-${index}`} progress={progress} index={Math.min(index, 7)}>
-              {content}
-            </ProgressRow>
-          ) : (
+          return (
             <li key={`${active}-${index}`} className="signal-row">{content}</li>
           );
         })}

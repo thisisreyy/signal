@@ -45,7 +45,7 @@ body {
 /* ---------- Background depth (layers driven by scroll in App.tsx) ---------- */
 
 .bg-depth { position: fixed; inset: -8% 0; z-index: 0; pointer-events: none; overflow: hidden; }
-.bg-layer { position: absolute; inset: 0; will-change: transform; }
+.bg-layer { position: absolute; inset: 0; }
 .bg-a { background: radial-gradient(1000px 520px at 14% -4%, rgba(109, 90, 230, 0.14), transparent 66%); }
 .bg-b { background: radial-gradient(820px 460px at 88% 106%, rgba(240, 177, 58, 0.05), transparent 70%); }
 
@@ -309,20 +309,7 @@ body {
 
 /* ---------- Observatory band (Signals + Tracking, one pinned sequence) ---------- */
 
-.observatory { position: relative; height: 158vh; margin: 96px 0 8px; }
-.observatory.calm { height: auto; margin: 72px 0 8px; }
-
-.obs-inner { position: sticky; top: 76px; }
-.observatory.calm .obs-inner { position: static; }
-
-.obs-rail {
-  position: absolute;
-  left: -30px; top: 8px; bottom: 8px;
-  width: 2px; border-radius: 2px;
-  background: linear-gradient(var(--accent), transparent);
-  transform-origin: top;
-  opacity: 0.65;
-}
+.observatory { margin: 88px 0 8px; }
 
 .obs-grid {
   display: grid;
@@ -493,9 +480,7 @@ body {
 @media (max-width: 900px) {
   .app { padding: 0 20px 56px; }
   .hero { padding: 48px 0 40px; }
-  .observatory, .observatory.calm { height: auto; margin: 56px 0 0; }
-  .obs-inner { position: static; }
-  .obs-rail { display: none; }
+  .observatory { margin: 56px 0 0; }
   .obs-grid { grid-template-columns: 1fr; gap: 44px; }
   .obs-grid > div:last-child .obs-col { border-left: none; padding-left: 0; border-top: 1px solid var(--hairline); padding-top: 28px; }
   .signals { max-height: 400px; }
