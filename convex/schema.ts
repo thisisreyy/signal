@@ -76,6 +76,96 @@ export default defineSchema({
     .index("by_run_keyword", ["runId", "keyword"])
     .index("by_keyword", ["keyword"]),
 
+  // ---------- Auto-discovery pipeline (additive; daily tracking untouched) ----------
+
+  // One document per discovery run: an explicit state machine, not booleans.
+  discoveryRuns: defineTable({
+    url: v.string(),
+    state: v.union(
+      v.literal("PROFILING"),
+      v.literal("GENERATING_KEYWORDS"),
+      v.literal("VALIDATING"),
+      v.literal("EXTRACTING_COMPETITORS"),
+      v.literal("RECOMMENDING"),
+      v.literal("COMPLETE"),
+      v.literal("FAILED"),
+    ),
+    error: v.optional(v.string()),
+    // Crash-simulation across the pipeline: throw once (attempt 1 only) at a
+    // chosen point inside the named step. "before-ledger"/"after-ledger"
+    // target the exact dual-write gap on purpose.
+    injectCrash: v.optional(
+      v.object({
+        step: v.string(),
+        where: v.union(v.literal("before-ledger"), v.literal("after-ledger")),
+      }),
+    ),
+    // Cost accounting, incremented transactionally with each ledger write.
+    fetchCalls: v.number(),
+    llmCalls: v.number(),
+    searchCalls: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_url", ["url"])
+    .index("by_state", ["state"]),
+
+  // The outbox: one row per unit of work. The intent is written (and the next
+  // action scheduled) in the same mutation — transactionally — before any
+  // external call happens. Status lifecycle: pending → running → done|failed.
+  discoverySteps: defineTable({
+    discoveryId: v.id("discoveryRuns"),
+    kind: v.string(),
+    stepKey: v.string(), // derived: discoveryId + kind + input hash
+    status: v.union(
+      v.literal("pending"),
+      v.literal("running"),
+      v.literal("done"),
+      v.literal("failed"),
+    ),
+    attempts: v.number(),
+    nextAttemptAt: v.optional(v.number()),
+    startedAt: v.optional(v.number()),
+    doneAt: v.optional(v.number()),
+    error: v.optional(v.string()),
+    errorClass: v.optional(v.union(v.literal("retryable"), v.literal("terminal"))),
+    result: v.optional(v.any()), // small summaries only; big payloads live in externalCalls
+  })
+    .index("by_stepKey", ["stepKey"])
+    .index("by_discovery", ["discoveryId"])
+    .index("by_status", ["status"]),
+
+  // The effect ledger: every external call's result, keyed by request content.
+  // Doubles as the retry cache (a healed crash re-reads instead of re-calling)
+  // and the 24h search cache. Written by a mutation the moment a call returns.
+  externalCalls: defineTable({
+    callKey: v.string(),
+    kind: v.union(v.literal("fetch"), v.literal("llm"), v.literal("serper")),
+    discoveryId: v.optional(v.id("discoveryRuns")),
+    request: v.string(), // human-readable request summary (never secrets)
+    response: v.any(),
+    ok: v.boolean(),
+    createdAt: v.number(),
+  }).index("by_callKey", ["callKey"]),
+
+  // The profiling step's output. Nulls are honest answers, each field scored.
+  businessProfiles: defineTable({
+    discoveryId: v.id("discoveryRuns"),
+    url: v.string(),
+    name: v.union(v.string(), v.null()),
+    whatTheySell: v.union(v.string(), v.null()),
+    audience: v.union(v.literal("b2b"), v.literal("b2c"), v.null()),
+    buyerType: v.union(v.string(), v.null()),
+    pricePoint: v.union(v.string(), v.null()),
+    businessStage: v.union(v.string(), v.null()),
+    category: v.union(v.string(), v.null()),
+    fieldConfidence: v.record(v.string(), v.number()),
+    pagesFetched: v.array(
+      v.object({ url: v.string(), ok: v.boolean(), chars: v.number() }),
+    ),
+    createdAt: v.number(),
+  }).index("by_discovery", ["discoveryId"]),
+
   // Singleton config, editable from the dashboard; the Worker reads it here so
   // there is one source of truth.
   config: defineTable({
