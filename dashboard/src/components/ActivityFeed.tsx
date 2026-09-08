@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { motion } from "framer-motion";
 import { api } from "../../../convex/_generated/api";
 import type { Doc, Id } from "../../../convex/_generated/dataModel";
 import { formatDuration, formatTime } from "../format";
 import { triggerCheck } from "../lib";
+import { useCalm } from "./motion";
 
 /** Runs as plain sentences; click one to see the per-keyword details. */
 export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
@@ -12,14 +14,18 @@ export function ActivityFeed({ runs }: { runs: Doc<"runs">[] }) {
   return (
     <section className="feed">
       <div className="feed-head">
-        <h2>Agent activity</h2>
+        <div>
+          <span className="eyebrow">Ops log</span>
+          <h2>Agent activity</h2>
+        </div>
         <SimulateCrashButton />
       </div>
       <ul>
-        {runs.map((run) => (
+        {runs.map((run, index) => (
           <FeedItem
             key={run._id}
             run={run}
+            index={index}
             open={openRunId === run._id}
             onToggle={() => setOpenRunId(openRunId === run._id ? null : run._id)}
           />
@@ -60,16 +66,27 @@ function describe(run: Doc<"runs">): { icon: string; tone: string; text: string 
 
 function FeedItem({
   run,
+  index,
   open,
   onToggle,
 }: {
   run: Doc<"runs">;
+  index: number;
   open: boolean;
   onToggle: () => void;
 }) {
   const { icon, tone, text } = describe(run);
+  const calm = useCalm();
+  const entrance = calm
+    ? {}
+    : {
+        initial: { opacity: 0, y: 6 },
+        whileInView: { opacity: 1, y: 0 },
+        viewport: { once: true },
+        transition: { duration: 0.35, delay: Math.min(index, 10) * 0.025 },
+      };
   return (
-    <li className={`feed-item ${open ? "open" : ""}`}>
+    <motion.li className={`feed-item ${open ? "open" : ""}`} {...entrance}>
       <button className="feed-row" onClick={onToggle} aria-expanded={open}>
         <span className="feed-time">{formatTime(run.startedAt)}</span>
         <span className={`feed-icon feed-icon-${tone}`}>{icon}</span>
@@ -82,7 +99,7 @@ function FeedItem({
         <span className="feed-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
       </button>
       {open && <FeedDetail runId={run._id} />}
-    </li>
+    </motion.li>
   );
 }
 

@@ -21,7 +21,8 @@ export function TrackingPanel({ config }: { config: GrowthConfig }) {
   }
 
   return (
-    <section className="panel-card tracking">
+    <section className="obs-col tracking">
+      <span className="eyebrow">Configuration</span>
       <h2>What the agent tracks</h2>
 
       <label className="field">

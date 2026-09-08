@@ -1,12 +1,15 @@
 import { useQuery } from "convex/react";
+import { motion } from "framer-motion";
 import { api } from "../../../convex/_generated/api";
 import { formatAgo, formatTime } from "../format";
 import { faviconOf } from "../lib";
 import { Sparkline } from "./Sparkline";
+import { useCalm } from "./motion";
 
 /** One target keyword: your position, the trend, and the ranked field. */
-export function KeywordCard({ keyword }: { keyword: string }) {
+export function KeywordCard({ keyword, index = 0 }: { keyword: string; index?: number }) {
   const history = useQuery(api.keywordChecks.history, { keyword, limit: 30 });
+  const calm = useCalm();
   if (history === undefined) {
     return <article className="site quiet">Loading “{keyword}”…</article>;
   }
@@ -35,8 +38,19 @@ export function KeywordCard({ keyword }: { keyword: string }) {
       )
     : [];
 
+  // Entrance: staggered rise, once. Changed rank: a single emphasis pulse.
+  const entrance = calm
+    ? {}
+    : {
+        initial: { opacity: 0, y: 18, scale: 0.97 },
+        whileInView: { opacity: 1, y: 0, scale: 1 },
+        viewport: { once: true, margin: "0px 0px -40px 0px" },
+        transition: { duration: 0.55, delay: index * 0.07, ease: [0.22, 0.61, 0.36, 1] as const },
+      };
+  const emphasize = !calm && delta !== null && delta !== 0;
+
   return (
-    <article className="site">
+    <motion.article className="site" {...entrance}>
       <header className="site-top">
         <div className="site-names">
           <h3>“{keyword}”</h3>
@@ -45,13 +59,17 @@ export function KeywordCard({ keyword }: { keyword: string }) {
       </header>
 
       <div className="site-status">
-        <span className="rank-big">
+        <motion.span
+          className="rank-big"
+          animate={emphasize ? { scale: [1, 1.1, 1] } : undefined}
+          transition={{ duration: 0.7, delay: 0.6 + index * 0.07, times: [0, 0.35, 1] }}
+        >
           {businessNow?.position !== undefined ? (
             <>#{businessNow.position}</>
           ) : (
             <span className="rank-unranked">not in top 20</span>
           )}
-        </span>
+        </motion.span>
         {delta !== null && delta !== 0 && (
           <span className={`badge ${delta > 0 ? "badge-up" : "badge-down"}`}>
             {delta > 0 ? "▲" : "▼"} {Math.abs(delta)}
@@ -89,6 +107,6 @@ export function KeywordCard({ keyword }: { keyword: string }) {
         </ul>
       )}
       {!latest && <span className="quiet">No data yet — run a check.</span>}
-    </article>
+    </motion.article>
   );
 }

@@ -3,6 +3,7 @@ import { useQuery } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { formatAgo } from "../format";
 import { faviconOf } from "../lib";
+import { ProgressRow, useBandProgress } from "./Observatory";
 
 interface Signal {
   at: number;
@@ -25,6 +26,7 @@ interface Signal {
 export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
   const signals = useQuery(api.keywordChecks.signals, {}) as Signal[] | undefined;
   const [selected, setSelected] = useState<string | null>(null);
+  const progress = useBandProgress();
 
   // Tabs: current business first, then past eras by most recent signal.
   const eras: string[] = [];
@@ -38,8 +40,10 @@ export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
   const visible = (signals ?? []).filter((s) => s.business === active);
 
   return (
-    <section className="panel-card">
+    <section className="obs-col signals-col">
+      <span className="eyebrow"><span className="eyebrow-dot" aria-hidden="true" />Observation</span>
       <h2>Signals</h2>
+      <p className="sec-sub">Every meaningful ranking change the agent has caught, newest first.</p>
 
       {eras.length > 1 && (
         <div className="signal-tabs" role="tablist" aria-label="Tracked business">
@@ -70,12 +74,22 @@ export function SignalsFeed({ businessDomain }: { businessDomain: string }) {
       <ul className="signals">
         {visible.map((signal, index) => {
           const { icon, tone, text } = phrase(signal, active);
-          return (
-            <li key={index} className="signal-row">
+          const content = (
+            <>
               <span className={`feed-icon feed-icon-${tone}`}>{icon}</span>
               <span className="signal-text">{text}</span>
               <span className="signal-when">{formatAgo(signal.at)}</span>
-            </li>
+            </>
+          );
+          // The first rows reveal sequentially with the band's scroll
+          // progress; everything past the sequence shares the final slot so
+          // no later row is ever brighter than the ones still revealing.
+          return progress ? (
+            <ProgressRow key={`${active}-${index}`} progress={progress} index={Math.min(index, 7)}>
+              {content}
+            </ProgressRow>
+          ) : (
+            <li key={`${active}-${index}`} className="signal-row">{content}</li>
           );
         })}
       </ul>
