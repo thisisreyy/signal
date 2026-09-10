@@ -11,14 +11,19 @@
     "dev:convex": "convex dev",
     "dev:worker": "cd worker && bun x wrangler dev --test-scheduled",
     "dev:dashboard": "cd dashboard && bun run dev",
-    "test": "cd agent && bun test",
+    "test": "cd agent && bun test && cd .. && vitest run",
     "typecheck": "tsc -p convex && bun run --filter '*' typecheck",
-    "deploy": "./scripts/deploy.sh"
+    "deploy": "./scripts/deploy.sh",
+    "test:convex": "vitest run"
   },
   "dependencies": {
     "convex": "^1.28.0"
   },
   "devDependencies": {
-    "typescript": "^5.9.0"
+    "@edge-runtime/vm": "^5.0.0",
+    "convex-test": "^0.0.57",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.0"
   }
 }
