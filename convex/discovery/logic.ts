@@ -21,7 +21,7 @@ export type DiscoveryState = (typeof DISCOVERY_STATES)[number];
  * "awaiting the next phase of the build", not stuck — the sweep leaves it
  * alone and the UI can say so honestly.
  */
-export const IMPLEMENTED_FRONTIER: DiscoveryState = "RECOMMENDING";
+export const IMPLEMENTED_FRONTIER: DiscoveryState = "COMPLETE";
 
 export const STEP_KINDS = [
   "FETCH_PAGES",
@@ -29,6 +29,7 @@ export const STEP_KINDS = [
   "GENERATE_KEYWORDS",
   "VALIDATE_BATCH",
   "EXTRACT_COMPETITORS",
+  "RECOMMEND",
 ] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -43,7 +44,7 @@ export const STEPS_FOR_STATE: Record<DiscoveryState, readonly StepKind[]> = {
   GENERATING_KEYWORDS: ["GENERATE_KEYWORDS"],
   VALIDATING: [], // data-driven: see nextValidationBatch / ensureValidationStep
   EXTRACTING_COMPETITORS: ["EXTRACT_COMPETITORS"],
-  RECOMMENDING: [], // Phase 5
+  RECOMMENDING: ["RECOMMEND"],
   COMPLETE: [],
   FAILED: [],
 };
@@ -906,4 +907,280 @@ export function rankCompetitors<
     // Domain breaks score ties so the ranking is stable run to run.
     .sort((a, b) => b.score - a.score || a.domain.localeCompare(b.domain))
     .map((c, index) => ({ ...c, rank: index + 1, selected: index < topN }));
+}
+
+// ---------- Phase 5: structured, evidence-grounded recommendations ----------
+
+export const MAX_RECOMMENDATIONS = 8;
+export const MIN_TIMEFRAME_DAYS = 1;
+export const MAX_TIMEFRAME_DAYS = 180;
+export const MAX_PREDICTED_RANK = 100;
+
+/**
+ * The stored ranking facts for one keyword: where the business actually sits
+ * and where each tracked competitor actually sits, as recorded during
+ * validation. This is the ONLY thing a recommendation may cite.
+ */
+export interface KeywordTruth {
+  keyword: string;
+  ourRank?: number; // absent = the business does not rank
+  competitors: { domain: string; rank: number }[];
+}
+
+/** Build the ground truth from stored validation evidence. */
+export function buildGroundTruth(
+  validated: readonly {
+    keyword: string;
+    topDomains: readonly { domain: string; position: number }[];
+  }[],
+  businessDomain: string,
+  competitorDomains: readonly string[],
+): KeywordTruth[] {
+  const business = registrableDomain(businessDomain);
+  const tracked = new Set(competitorDomains.map(registrableDomain));
+
+  return validated.map(({ keyword, topDomains }) => {
+    let ourRank: number | undefined;
+    const competitors: { domain: string; rank: number }[] = [];
+    for (const result of topDomains) {
+      const domain = registrableDomain(result.domain);
+      if (domain === business) {
+        if (ourRank === undefined || result.position < ourRank) ourRank = result.position;
+      } else if (tracked.has(domain)) {
+        const existing = competitors.find((c) => c.domain === domain);
+        if (!existing) competitors.push({ domain, rank: result.position });
+        else if (result.position < existing.rank) existing.rank = result.position;
+      }
+    }
+    return { keyword, ourRank, competitors };
+  });
+}
+
+export type RecommendationStatus = "open" | "correct" | "incorrect" | "inconclusive";
+
+export interface RecEvidence {
+  keyword: string;
+  ourRank?: number;
+  competitor?: string;
+  theirRank?: number;
+}
+
+export interface Recommendation {
+  action: string;
+  rationale: string;
+  evidence: RecEvidence[];
+  expectedOutcome: {
+    keyword: string;
+    currentRank?: number;
+    predictedRank: number;
+    timeframeDays: number;
+  };
+  confidence: number;
+  fallback: string;
+}
+
+export const RECOMMENDATIONS_TOOL_SCHEMA = {
+  name: "emit_recommendations",
+  description:
+    "Emit growth recommendations. Every recommendation must cite the ranking facts given to you, exactly as given — they are checked against the database and any recommendation whose citations do not match is discarded.",
+  input_schema: {
+    type: "object",
+    properties: {
+      recommendations: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            action: { type: "string", description: "What to do, concretely" },
+            rationale: { type: "string", description: "Why, referencing the evidence" },
+            evidence: {
+              type: "array",
+              description: "Ranking facts copied exactly from the data provided",
+              items: {
+                type: "object",
+                properties: {
+                  keyword: { type: "string" },
+                  our_rank: { type: ["number", "null"], description: "null if not ranked" },
+                  competitor: { type: ["string", "null"] },
+                  their_rank: { type: ["number", "null"] },
+                },
+                required: ["keyword"],
+              },
+            },
+            expected_outcome: {
+              type: "object",
+              properties: {
+                keyword: { type: "string" },
+                current_rank: { type: ["number", "null"] },
+                predicted_rank: { type: "number" },
+                timeframe_days: { type: "number" },
+              },
+              required: ["keyword", "predicted_rank", "timeframe_days"],
+            },
+            confidence: { type: "number", description: "0..1" },
+            fallback: { type: "string", description: "What to try if this does not work" },
+          },
+          required: ["action", "rationale", "evidence", "expected_outcome", "confidence", "fallback"],
+        },
+      },
+    },
+    required: ["recommendations"],
+  },
+} as const;
+
+/** Structural parse only — grounding is checked separately, against the DB. */
+export function validateRecommendations(
+  raw: unknown,
+): { ok: true; recommendations: Recommendation[] } | { ok: false; reason: string } {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, reason: "payload is not an object" };
+  }
+  const list = (raw as Record<string, unknown>).recommendations;
+  if (!Array.isArray(list)) return { ok: false, reason: "recommendations must be an array" };
+  if (list.length === 0) return { ok: false, reason: "recommendations array is empty" };
+
+  const recommendations: Recommendation[] = [];
+  for (const item of list.slice(0, MAX_RECOMMENDATIONS)) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.action !== "string" || o.action.trim() === "") continue;
+    if (typeof o.rationale !== "string") continue;
+    if (!Array.isArray(o.evidence)) continue;
+
+    const outcome = o.expected_outcome as Record<string, unknown> | undefined;
+    if (typeof outcome !== "object" || outcome === null) continue;
+    if (typeof outcome.keyword !== "string") continue;
+    const predictedRank = outcome.predicted_rank;
+    const timeframeDays = outcome.timeframe_days;
+    if (typeof predictedRank !== "number" || typeof timeframeDays !== "number") continue;
+    if (predictedRank < 1 || predictedRank > MAX_PREDICTED_RANK) continue;
+    if (timeframeDays < MIN_TIMEFRAME_DAYS || timeframeDays > MAX_TIMEFRAME_DAYS) continue;
+
+    const evidence: RecEvidence[] = [];
+    for (const e of o.evidence) {
+      if (typeof e !== "object" || e === null) continue;
+      const ev = e as Record<string, unknown>;
+      if (typeof ev.keyword !== "string") continue;
+      evidence.push({
+        keyword: normalizeKeyword(ev.keyword),
+        ourRank: typeof ev.our_rank === "number" ? ev.our_rank : undefined,
+        competitor:
+          typeof ev.competitor === "string" ? registrableDomain(ev.competitor) : undefined,
+        theirRank: typeof ev.their_rank === "number" ? ev.their_rank : undefined,
+      });
+    }
+    if (evidence.length === 0) continue; // no citations at all: not a candidate
+
+    recommendations.push({
+      action: o.action.trim().slice(0, 400),
+      rationale: o.rationale.trim().slice(0, 800),
+      evidence,
+      expectedOutcome: {
+        keyword: normalizeKeyword(outcome.keyword),
+        currentRank: typeof outcome.current_rank === "number" ? outcome.current_rank : undefined,
+        predictedRank: Math.round(predictedRank),
+        timeframeDays: Math.round(timeframeDays),
+      },
+      confidence:
+        typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1
+          ? o.confidence
+          : 0.5,
+      fallback: typeof o.fallback === "string" ? o.fallback.trim().slice(0, 400) : "",
+    });
+  }
+
+  if (recommendations.length === 0) {
+    return { ok: false, reason: "no structurally valid recommendations in the payload" };
+  }
+  return { ok: true, recommendations };
+}
+
+/**
+ * THE GROUNDING GATE.
+ *
+ * Structural validity is not grounding. Every citation is checked against the
+ * stored ranking facts: the keyword must be one we actually validated, and
+ * any rank the model claims must match what the database actually recorded.
+ * A recommendation that cites a position nobody observed is discarded rather
+ * than shown — an unsupported suggestion in the UI is indistinguishable from
+ * a fabricated one, so none are allowed through.
+ */
+export function verifyGrounding(
+  rec: Recommendation,
+  truth: readonly KeywordTruth[],
+): { ok: true; evidence: RecEvidence[] } | { ok: false; reason: string } {
+  const byKeyword = new Map(truth.map((t) => [t.keyword, t]));
+
+  const verified: RecEvidence[] = [];
+  for (const e of rec.evidence) {
+    const fact = byKeyword.get(e.keyword);
+    if (!fact) continue; // cites a keyword we never validated
+
+    if (e.ourRank !== undefined && e.ourRank !== fact.ourRank) continue; // wrong own rank
+    if (e.ourRank === undefined && e.competitor === undefined) continue; // cites nothing
+
+    if (e.competitor !== undefined) {
+      const comp = fact.competitors.find((c) => c.domain === e.competitor);
+      if (!comp) continue; // that competitor does not rank for this keyword
+      if (e.theirRank !== undefined && e.theirRank !== comp.rank) continue; // wrong rank
+      verified.push({ ...e, theirRank: comp.rank, ourRank: fact.ourRank });
+    } else {
+      verified.push({ ...e, ourRank: fact.ourRank });
+    }
+  }
+
+  if (verified.length === 0) {
+    return { ok: false, reason: "no evidence entry matched the stored ranking data" };
+  }
+
+  // The prediction must also be about something real and measurable later.
+  const target = byKeyword.get(rec.expectedOutcome.keyword);
+  if (!target) {
+    return { ok: false, reason: "predicts a keyword that is not tracked" };
+  }
+  if (
+    rec.expectedOutcome.currentRank !== undefined &&
+    rec.expectedOutcome.currentRank !== target.ourRank
+  ) {
+    return { ok: false, reason: "states a current rank that does not match stored data" };
+  }
+  return { ok: true, evidence: verified };
+}
+
+export function recommendationsPrompt(
+  profile: StoredProfile,
+  truth: readonly KeywordTruth[],
+): string {
+  const field = (label: string, value: string | null) => `${label}: ${value ?? "(unknown)"}`;
+  const facts = truth
+    .map((t) => {
+      const ours = t.ourRank !== undefined ? `#${t.ourRank}` : "NOT RANKED";
+      const comps = t.competitors.length
+        ? t.competitors.map((c) => `${c.domain} #${c.rank}`).join(", ")
+        : "(no tracked competitor ranks here)";
+      return `- "${t.keyword}" — you: ${ours}; competitors: ${comps}`;
+    })
+    .join("\n");
+
+  return `Recommend growth actions for this business, grounded strictly in the ranking facts below.
+
+BUSINESS
+${field("Name", profile.name)}
+${field("Category", profile.category)}
+${field("What they sell", profile.whatTheySell)}
+${field("Audience", profile.audience)}
+${field("Buyer", profile.buyerType)}
+
+RANKING FACTS (the only data you may cite)
+${facts}
+
+Produce up to ${MAX_RECOMMENDATIONS} recommendations. For each one:
+- action: a concrete thing to do, specific to a keyword and what the results show.
+- rationale: why, referring to the ranking facts.
+- evidence: copy the relevant facts EXACTLY as written above — same keyword, same ranks. Use null for a rank that is "NOT RANKED". These are checked against the database and any recommendation whose citations do not match is discarded.
+- expected_outcome: a falsifiable prediction — a keyword, its current rank (null if not ranked), the rank you predict, and a timeframe in days. It will be scored automatically against real measurements when that timeframe elapses, so predict something you would defend.
+- confidence: 0..1, honest.
+- fallback: what to try instead if this does not work.
+
+Do not invent a ranking, a competitor, or a keyword that is not listed above.`;
 }

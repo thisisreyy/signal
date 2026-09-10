@@ -263,6 +263,49 @@ export default defineSchema({
     .index("by_discoveryId", ["discoveryId"])
     .index("by_discoveryId_and_selected", ["discoveryId", "selected"]),
 
+  // Phase 5 output. Every row here has been verified against stored ranking
+  // data at write time — the evidence array cannot contain a position nobody
+  // observed, because verifyGrounding rejects the whole recommendation first.
+  recommendations: defineTable({
+    discoveryId: v.id("discoveryRuns"),
+    action: v.string(),
+    rationale: v.string(),
+    evidence: v.array(
+      v.object({
+        type: v.literal("ranking"),
+        keyword: v.string(),
+        ourRank: v.optional(v.number()), // absent = the business does not rank
+        competitor: v.optional(v.string()),
+        theirRank: v.optional(v.number()),
+        // Which stored record backs this claim, so the UI can link to it.
+        candidateId: v.optional(v.id("keywordCandidates")),
+      }),
+    ),
+    expectedOutcome: v.object({
+      keyword: v.string(),
+      currentRank: v.optional(v.number()),
+      predictedRank: v.number(),
+      timeframeDays: v.number(),
+    }),
+    confidence: v.number(),
+    fallback: v.string(),
+    status: v.union(
+      v.literal("open"),
+      v.literal("correct"),
+      v.literal("incorrect"),
+      v.literal("inconclusive"),
+    ),
+    // When the prediction becomes checkable, and how it turned out (Phase 6).
+    dueAt: v.number(),
+    scoredAt: v.optional(v.number()),
+    actualRank: v.optional(v.number()),
+    delta: v.optional(v.number()), // predicted - actual; negative = beat it
+    scoringNote: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_discoveryId", ["discoveryId"])
+    .index("by_status_and_dueAt", ["status", "dueAt"]),
+
   // Singleton config, editable from the dashboard; the Worker reads it here so
   // there is one source of truth.
   config: defineTable({

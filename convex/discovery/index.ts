@@ -20,6 +20,7 @@ import {
   MAX_SEARCH_CALLS,
   DEFAULT_TOP_COMPETITORS,
   DOMAIN_CLASSES,
+  MAX_RECOMMENDATIONS,
   nextStepKind,
   nextValidationBatch,
   STEP_STALE_MS,
@@ -311,6 +312,36 @@ export const getValidatedEvidence = internalQuery({
         position: d.position,
       })),
     }));
+  },
+});
+
+/** Validated evidence plus the selected competitor set, for Phase 5. */
+export const getRecommendationInputs = internalQuery({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const relevant = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId_and_status", (q) =>
+        q.eq("discoveryId", args.discoveryId).eq("status", "relevant"),
+      )
+      .take(MAX_CANDIDATES_TO_VALIDATE);
+    const selected = await ctx.db
+      .query("competitors")
+      .withIndex("by_discoveryId_and_selected", (q) =>
+        q.eq("discoveryId", args.discoveryId).eq("selected", true),
+      )
+      .take(50);
+    return {
+      validated: relevant.map((c) => ({
+        candidateId: c._id,
+        keyword: c.keyword,
+        topDomains: (c.validation?.topDomains ?? []).map((d) => ({
+          domain: d.domain,
+          position: d.position,
+        })),
+      })),
+      competitorDomains: selected.map((c) => c.domain),
+    };
   },
 });
 
@@ -652,6 +683,80 @@ export const applyToTracking = mutation({
   },
 });
 
+/**
+ * Recommendations verified and stored → the run is COMPLETE.
+ *
+ * The action has already discarded anything whose citations did not match
+ * stored data; this mutation records what survived, stamps each prediction
+ * with the moment it becomes checkable, and never invents a status other
+ * than "open" — scoring is Phase 6's job, done from measurements.
+ */
+export const completeRecommendStep = internalMutation({
+  args: {
+    stepId: v.id("discoverySteps"),
+    recommendations: v.array(
+      v.object({
+        action: v.string(),
+        rationale: v.string(),
+        evidence: v.array(
+          v.object({
+            type: v.literal("ranking"),
+            keyword: v.string(),
+            ourRank: v.optional(v.number()),
+            competitor: v.optional(v.string()),
+            theirRank: v.optional(v.number()),
+            candidateId: v.optional(v.id("keywordCandidates")),
+          }),
+        ),
+        expectedOutcome: v.object({
+          keyword: v.string(),
+          currentRank: v.optional(v.number()),
+          predictedRank: v.number(),
+          timeframeDays: v.number(),
+        }),
+        confidence: v.number(),
+        fallback: v.string(),
+      }),
+    ),
+    rejected: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step || step.status !== "running") return;
+    const run = await ctx.db.get(step.discoveryId);
+    if (!run) return;
+
+    // A healed retry rewrites rather than duplicates.
+    const existing = await ctx.db
+      .query("recommendations")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", run._id))
+      .take(MAX_RECOMMENDATIONS * 2);
+    for (const row of existing) await ctx.db.delete(row._id);
+
+    const now = Date.now();
+    for (const rec of args.recommendations) {
+      if (rec.evidence.length === 0) continue; // belt and braces: never ungrounded
+      await ctx.db.insert("recommendations", {
+        discoveryId: run._id,
+        ...rec,
+        status: "open",
+        dueAt: now + rec.expectedOutcome.timeframeDays * 24 * 60 * 60 * 1000,
+        createdAt: now,
+      });
+    }
+    await ctx.db.patch(step._id, {
+      status: "done",
+      doneAt: now,
+      result: { stored: args.recommendations.length, rejectedUngrounded: args.rejected },
+    });
+    await ctx.db.patch(run._id, {
+      state: "COMPLETE",
+      consecutiveFailures: 0,
+      updatedAt: now,
+    });
+  },
+});
+
 /** Failure path: retryable → backoff + re-pend; terminal → run FAILED. */
 export const failStep = internalMutation({
   args: {
@@ -859,7 +964,12 @@ export const sweep = internalMutation({
       await ensureValidationStep(ctx, run._id);
     }
 
-    for (const state of ["PROFILING", "GENERATING_KEYWORDS", "EXTRACTING_COMPETITORS"] as const) {
+    for (const state of [
+      "PROFILING",
+      "GENERATING_KEYWORDS",
+      "EXTRACTING_COMPETITORS",
+      "RECOMMENDING",
+    ] as const) {
       const runs = await ctx.db
         .query("discoveryRuns")
         .withIndex("by_state", (q) => q.eq("state", state))
@@ -901,12 +1011,17 @@ export const getRun = query({
       .query("competitors")
       .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
       .take(200);
+    const recommendations = await ctx.db
+      .query("recommendations")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(MAX_RECOMMENDATIONS * 2);
     return {
       run,
       steps,
       profile,
       candidates,
       competitors: competitors.sort((a, b) => b.score - a.score),
+      recommendations,
       implementedFrontier: IMPLEMENTED_FRONTIER,
     };
   },

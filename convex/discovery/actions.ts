@@ -14,6 +14,7 @@ import {
   PROFILE_TOOL_SCHEMA,
   profilePrompt,
   aggregateDomains,
+  buildGroundTruth,
   COMPETITORS_TOOL_SCHEMA,
   competitorsPrompt,
   DEFAULT_TOP_COMPETITORS,
@@ -25,8 +26,12 @@ import {
   toSerpDomains,
   validateKeywords,
   validateProfile,
+  RECOMMENDATIONS_TOOL_SCHEMA,
+  recommendationsPrompt,
   validateClassifications,
+  validateRecommendations,
   validateVerdicts,
+  verifyGrounding,
   VERDICTS_TOOL_SCHEMA,
   verdictsPrompt,
   type SerpDomain,
@@ -62,6 +67,8 @@ export const runStep = internalAction({
         await doValidateBatch(ctx, run, step);
       } else if (step.kind === "EXTRACT_COMPETITORS") {
         await doExtractCompetitors(ctx, run, step);
+      } else if (step.kind === "RECOMMEND") {
+        await doRecommend(ctx, run, step);
       } else {
         throw new Error(`unknown step kind ${step.kind}`);
       }
@@ -612,5 +619,123 @@ async function doExtractCompetitors(
   await ctx.runMutation(internal.discovery.index.completeCompetitorsStep, {
     stepId: step._id,
     domains: toStore,
+  });
+}
+
+// ---------- RECOMMEND ----------
+
+/** Exactly the shape completeRecommendStep accepts. */
+interface GroundedRecommendation {
+  action: string;
+  rationale: string;
+  evidence: {
+    type: "ranking";
+    keyword: string;
+    ourRank?: number;
+    competitor?: string;
+    theirRank?: number;
+    candidateId?: Doc<"keywordCandidates">["_id"];
+  }[];
+  expectedOutcome: {
+    keyword: string;
+    currentRank?: number;
+    predictedRank: number;
+    timeframeDays: number;
+  };
+  confidence: number;
+  fallback: string;
+}
+
+/**
+ * Generate recommendations, then refuse to store any that cannot be backed by
+ * stored ranking data.
+ *
+ * The model is handed the ranking facts and asked to cite them verbatim; every
+ * citation is then re-checked against the same records before anything is
+ * written. Structural validity is not grounding — a well-formed recommendation
+ * claiming a position nobody observed is exactly the failure this gate exists
+ * to catch, and it is discarded rather than shown.
+ */
+async function doRecommend(ctx: ActionCtx, run: Doc<"discoveryRuns">, step: Doc<"discoverySteps">) {
+  const profile = await ctx.runQuery(internal.discovery.index.getProfileForRun, {
+    discoveryId: run._id,
+  });
+  if (!profile) throw terminal("no business profile exists for this run");
+
+  const { validated, competitorDomains } = await ctx.runQuery(
+    internal.discovery.index.getRecommendationInputs,
+    { discoveryId: run._id },
+  );
+  if (validated.length === 0) {
+    throw terminal("no validated keywords to recommend against");
+  }
+
+  const truth = buildGroundTruth(validated, run.url, competitorDomains);
+  const candidateIdByKeyword = new Map(validated.map((v) => [v.keyword, v.candidateId]));
+  const prompt = recommendationsPrompt(profile, truth);
+
+  maybeInjectCrash(run, step, "before-ledger");
+  let parsed = validateRecommendations(
+    await llmToolCall(ctx, run, {
+      keyContent: `${run._id}:recommend:${contentHash(prompt)}`,
+      prompt,
+      tool: RECOMMENDATIONS_TOOL_SCHEMA,
+      maxTokens: 4000,
+    }),
+  );
+  maybeInjectCrash(run, step, "after-ledger");
+
+  if (!parsed.ok) {
+    const fixPrompt = `${prompt}\n\nYour previous output was rejected: ${parsed.reason}. Emit the recommendations again, following the schema exactly.`;
+    parsed = validateRecommendations(
+      await llmToolCall(ctx, run, {
+        keyContent: `${run._id}:recommend-fix:${contentHash(fixPrompt)}`,
+        prompt: fixPrompt,
+        tool: RECOMMENDATIONS_TOOL_SCHEMA,
+        maxTokens: 4000,
+      }),
+    );
+  }
+  if (!parsed.ok) {
+    throw terminal(`recommendation output malformed twice: ${parsed.reason}`);
+  }
+
+  // The grounding gate. Anything that fails it never reaches the database.
+  const grounded: GroundedRecommendation[] = [];
+  let rejected = 0;
+
+  for (const rec of parsed.recommendations) {
+    const check = verifyGrounding(rec, truth);
+    if (!check.ok) {
+      rejected += 1;
+      continue;
+    }
+    grounded.push({
+      action: rec.action,
+      rationale: rec.rationale,
+      evidence: check.evidence.map((e) => ({
+        type: "ranking" as const,
+        keyword: e.keyword,
+        ourRank: e.ourRank,
+        competitor: e.competitor,
+        theirRank: e.theirRank,
+        candidateId: candidateIdByKeyword.get(e.keyword),
+      })),
+      expectedOutcome: rec.expectedOutcome,
+      confidence: rec.confidence,
+      fallback: rec.fallback,
+    });
+  }
+
+  if (grounded.length === 0) {
+    throw terminal(
+      `every recommendation failed the grounding check (${rejected} rejected)`,
+    );
+  }
+
+  await ctx.runMutation(internal.discovery.index.completeRecommendStep, {
+    stepId: step._id,
+    recommendations: grounded,
+    rejected,
   });
 }

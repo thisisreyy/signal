@@ -634,3 +634,232 @@ describe("bugfix: fetch budget has headroom for re-attempts", () => {
     expect(MAX_FETCH_CALLS).toBeGreaterThanOrEqual(4 * 3);
   });
 });
+
+// ---------- Phase 5: the grounding gate ----------
+
+import {
+  buildGroundTruth,
+  MAX_PREDICTED_RANK,
+  recommendationsPrompt,
+  validateRecommendations,
+  verifyGrounding,
+  type KeywordTruth,
+} from "../../convex/discovery/logic";
+
+const TRUTH: KeywordTruth[] = [
+  { keyword: "ai bdr", ourRank: undefined, competitors: [{ domain: "artisan.co", rank: 1 }] },
+  { keyword: "gtm automation platform", ourRank: 8, competitors: [{ domain: "clay.com", rank: 4 }] },
+];
+
+function rec(over: Partial<Parameters<typeof verifyGrounding>[0]> = {}) {
+  return {
+    action: "Publish a comparison page",
+    rationale: "because",
+    evidence: [{ keyword: "ai bdr", competitor: "artisan.co", theirRank: 1 }],
+    expectedOutcome: { keyword: "ai bdr", predictedRank: 15, timeframeDays: 30 },
+    confidence: 0.6,
+    fallback: "try something else",
+    ...over,
+  };
+}
+
+describe("ground truth from stored evidence", () => {
+  test("records our rank and each tracked competitor's rank", () => {
+    const truth = buildGroundTruth(
+      [
+        {
+          keyword: "ai bdr",
+          topDomains: [
+            { domain: "artisan.co", position: 1 },
+            { domain: "reddit.com", position: 2 },
+            { domain: "acme.com", position: 6 },
+          ],
+        },
+      ],
+      "https://acme.com",
+      ["artisan.co"],
+    );
+    expect(truth[0]!.ourRank).toBe(6);
+    expect(truth[0]!.competitors).toEqual([{ domain: "artisan.co", rank: 1 }]);
+  });
+
+  test("untracked domains never become facts", () => {
+    const truth = buildGroundTruth(
+      [{ keyword: "k", topDomains: [{ domain: "random.com", position: 1 }] }],
+      "https://acme.com",
+      ["artisan.co"],
+    );
+    expect(truth[0]!.competitors).toHaveLength(0);
+  });
+
+  test("not ranking is recorded as absent, not as a large number", () => {
+    const truth = buildGroundTruth(
+      [{ keyword: "k", topDomains: [{ domain: "artisan.co", position: 1 }] }],
+      "https://acme.com",
+      ["artisan.co"],
+    );
+    expect(truth[0]!.ourRank).toBeUndefined();
+  });
+});
+
+describe("the grounding gate rejects fabrication", () => {
+  test("accepts a recommendation whose citations match stored data", () => {
+    const result = verifyGrounding(rec(), TRUTH);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.evidence[0]!.competitor).toBe("artisan.co");
+  });
+
+  test("rejects a hallucinated competitor rank", () => {
+    const result = verifyGrounding(
+      rec({ evidence: [{ keyword: "ai bdr", competitor: "artisan.co", theirRank: 9 }] }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false); // stored data says #1, not #9
+  });
+
+  test("rejects a competitor that does not rank for that keyword", () => {
+    const result = verifyGrounding(
+      rec({ evidence: [{ keyword: "ai bdr", competitor: "clay.com", theirRank: 4 }] }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false); // clay ranks for a different keyword
+  });
+
+  test("rejects a keyword we never validated", () => {
+    const result = verifyGrounding(
+      rec({ evidence: [{ keyword: "invented keyword", competitor: "artisan.co", theirRank: 1 }] }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  test("rejects a claim that we rank when stored data says we don't", () => {
+    const result = verifyGrounding(
+      rec({ evidence: [{ keyword: "ai bdr", ourRank: 3 }] }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  test("rejects a prediction about an untracked keyword", () => {
+    const result = verifyGrounding(
+      rec({ expectedOutcome: { keyword: "not tracked", predictedRank: 5, timeframeDays: 30 } }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("not tracked");
+  });
+
+  test("rejects a stated current rank that contradicts stored data", () => {
+    const result = verifyGrounding(
+      rec({
+        evidence: [{ keyword: "gtm automation platform", competitor: "clay.com", theirRank: 4 }],
+        expectedOutcome: {
+          keyword: "gtm automation platform",
+          currentRank: 2, // stored says 8
+          predictedRank: 3,
+          timeframeDays: 30,
+        },
+      }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  test("keeps only the citations that check out, dropping the rest", () => {
+    const result = verifyGrounding(
+      rec({
+        evidence: [
+          { keyword: "ai bdr", competitor: "artisan.co", theirRank: 1 }, // true
+          { keyword: "ai bdr", competitor: "clay.com", theirRank: 4 }, // false
+        ],
+      }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.evidence).toHaveLength(1);
+  });
+
+  test("backfills the true rank rather than trusting what was claimed", () => {
+    const result = verifyGrounding(
+      rec({ evidence: [{ keyword: "ai bdr", competitor: "artisan.co" }] }),
+      TRUTH,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.evidence[0]!.theirRank).toBe(1); // from the database
+  });
+});
+
+describe("recommendation structure", () => {
+  const good = {
+    recommendations: [
+      {
+        action: "do the thing",
+        rationale: "because of the data",
+        evidence: [{ keyword: "ai bdr", competitor: "artisan.co", their_rank: 1 }],
+        expected_outcome: { keyword: "ai bdr", predicted_rank: 12, timeframe_days: 30 },
+        confidence: 0.7,
+        fallback: "otherwise this",
+      },
+    ],
+  };
+
+  test("accepts a well-formed recommendation", () => {
+    const result = validateRecommendations(good);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.recommendations[0]!.expectedOutcome.predictedRank).toBe(12);
+  });
+
+  test("drops a recommendation with no evidence array entries at all", () => {
+    const bare = { recommendations: [{ ...good.recommendations[0], evidence: [] }] };
+    expect(validateRecommendations(bare).ok).toBe(false);
+  });
+
+  test("drops an unfalsifiable prediction", () => {
+    const noTimeframe = {
+      recommendations: [
+        {
+          ...good.recommendations[0],
+          expected_outcome: { keyword: "ai bdr", predicted_rank: 12 },
+        },
+      ],
+    };
+    expect(validateRecommendations(noTimeframe).ok).toBe(false);
+  });
+
+  test("drops an out-of-range prediction", () => {
+    const absurd = {
+      recommendations: [
+        {
+          ...good.recommendations[0],
+          expected_outcome: {
+            keyword: "ai bdr",
+            predicted_rank: MAX_PREDICTED_RANK + 500,
+            timeframe_days: 30,
+          },
+        },
+      ],
+    };
+    expect(validateRecommendations(absurd).ok).toBe(false);
+  });
+
+  test("rejects prose where a schema is required", () => {
+    expect(validateRecommendations("You should write more blog posts.").ok).toBe(false);
+  });
+});
+
+describe("recommendation prompt", () => {
+  test("states the facts and warns that citations are checked", () => {
+    const prompt = recommendationsPrompt(
+      {
+        name: "Acme", whatTheySell: "widgets", audience: "b2b", buyerType: null,
+        pricePoint: null, businessStage: null, category: "widgets",
+      },
+      TRUTH,
+    );
+    expect(prompt).toContain("NOT RANKED");
+    expect(prompt).toContain("artisan.co #1");
+    expect(prompt).toContain("checked against the database");
+    expect(prompt).toContain("Do not invent");
+  });
+});
