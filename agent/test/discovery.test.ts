@@ -139,3 +139,135 @@ describe("page handling", () => {
     expect(prompt).toContain("null");
   });
 });
+
+// ---------- Phase 2 ----------
+
+import {
+  KEYWORD_KINDS,
+  keywordsPrompt,
+  MIN_KEYWORDS,
+  nextStepKind,
+  normalizeKeyword,
+  validateKeywords,
+} from "../../convex/discovery/logic";
+
+function makeKeywords(n: number, kind: string = "category") {
+  return Array.from({ length: n }, (_, i) => ({
+    keyword: `keyword number ${i}`,
+    kind: KEYWORD_KINDS[i % KEYWORD_KINDS.length] ?? kind,
+    rationale: "a buyer would search this",
+  }));
+}
+
+describe("state machine resumption", () => {
+  test("derives the next step from state plus finished steps", () => {
+    expect(nextStepKind("PROFILING", [])).toBe("FETCH_PAGES");
+    expect(nextStepKind("PROFILING", ["FETCH_PAGES"])).toBe("PROFILE");
+    expect(nextStepKind("PROFILING", ["FETCH_PAGES", "PROFILE"])).toBeNull();
+    expect(nextStepKind("GENERATING_KEYWORDS", [])).toBe("GENERATE_KEYWORDS");
+    expect(nextStepKind("GENERATING_KEYWORDS", ["GENERATE_KEYWORDS"])).toBeNull();
+  });
+
+  test("states past the implemented frontier have no next step", () => {
+    expect(nextStepKind("VALIDATING", [])).toBeNull();
+    expect(nextStepKind("COMPLETE", [])).toBeNull();
+    expect(nextStepKind("FAILED", [])).toBeNull();
+  });
+});
+
+describe("keyword normalization", () => {
+  test("lowercases, trims, collapses whitespace and strips quotes", () => {
+    expect(normalizeKeyword('  "Invoicing   Software" ')).toBe("invoicing software");
+    expect(normalizeKeyword("AI BDR")).toBe("ai bdr");
+  });
+
+  test("normalization is what makes dedup work", () => {
+    expect(normalizeKeyword("AI BDR")).toBe(normalizeKeyword("  ai bdr  "));
+  });
+});
+
+describe("keyword validation", () => {
+  test("accepts a well-formed mixed pool", () => {
+    const result = validateKeywords({ keywords: makeKeywords(16) });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.keywords).toHaveLength(16);
+  });
+
+  test("rejects a pool that is too thin to be a pool", () => {
+    const result = validateKeywords({ keywords: makeKeywords(5) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain(`at least ${MIN_KEYWORDS}`);
+  });
+
+  test("rejects more than the maximum", () => {
+    expect(validateKeywords({ keywords: makeKeywords(40) }).ok).toBe(false);
+  });
+
+  test("drops duplicates rather than failing", () => {
+    const dupes = [...makeKeywords(16), ...makeKeywords(4)]; // 4 exact repeats
+    const result = validateKeywords({ keywords: dupes.slice(0, 20) });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const unique = new Set(result.keywords.map((k) => k.keyword));
+      expect(unique.size).toBe(result.keywords.length);
+    }
+  });
+
+  test("rejects a single-flavour pool — the phase promises a mix", () => {
+    const flat = Array.from({ length: 16 }, (_, i) => ({
+      keyword: `category term ${i}`,
+      kind: "category",
+      rationale: "why",
+    }));
+    const result = validateKeywords({ keywords: flat });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("mix");
+  });
+
+  test("rejects an unknown kind", () => {
+    const bad = makeKeywords(16);
+    bad[0]!.kind = "vibes";
+    const result = validateKeywords({ keywords: bad });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("kind");
+  });
+
+  test("rejects prose where a schema is required", () => {
+    expect(validateKeywords("here are some keywords: invoicing software").ok).toBe(false);
+    expect(validateKeywords({ keywords: "invoicing software" }).ok).toBe(false);
+    expect(validateKeywords(null).ok).toBe(false);
+  });
+
+  test("rejects an over-long keyword", () => {
+    const bad = makeKeywords(16);
+    bad[0]!.keyword = "x".repeat(200);
+    expect(validateKeywords({ keywords: bad }).ok).toBe(false);
+  });
+});
+
+describe("keyword prompt", () => {
+  const profile = {
+    name: "Revnu",
+    whatTheySell: "AI growth automation",
+    audience: "b2b" as const,
+    buyerType: "founders",
+    pricePoint: null,
+    businessStage: "early-stage",
+    category: "growth automation platform",
+  };
+
+  test("includes the profile and demands the required mix", () => {
+    const prompt = keywordsPrompt("https://revnu.com", profile);
+    expect(prompt).toContain("growth automation platform");
+    for (const kind of KEYWORD_KINDS) expect(prompt).toContain(kind);
+  });
+
+  test("marks unknown fields as not determinable instead of inviting a guess", () => {
+    const prompt = keywordsPrompt("https://revnu.com", profile);
+    expect(prompt).toContain("not determinable");
+  });
+
+  test("tells the model to exclude the business's own brand", () => {
+    expect(keywordsPrompt("https://revnu.com", profile)).toContain("own brand name");
+  });
+});

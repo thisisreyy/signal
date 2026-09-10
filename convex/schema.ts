@@ -91,6 +91,17 @@ export default defineSchema({
       v.literal("FAILED"),
     ),
     error: v.optional(v.string()),
+    // Set when a run fails, so a human-initiated resume knows which phase to
+    // restore. FAILED alone would erase where the run actually was.
+    stateBeforeFailure: v.optional(
+      v.union(
+        v.literal("PROFILING"),
+        v.literal("GENERATING_KEYWORDS"),
+        v.literal("VALIDATING"),
+        v.literal("EXTRACTING_COMPETITORS"),
+        v.literal("RECOMMENDING"),
+      ),
+    ),
     // Crash-simulation across the pipeline: throw once (attempt 1 only) at a
     // chosen point inside the named step. "before-ledger"/"after-ledger"
     // target the exact dual-write gap on purpose.
@@ -165,6 +176,30 @@ export default defineSchema({
     ),
     createdAt: v.number(),
   }).index("by_discovery", ["discoveryId"]),
+
+  // Phase 2 output: proposed keywords, stored as guesses. Nothing here is
+  // tracked — status stays "unvalidated" until real search results in Phase 3
+  // promote or reject each one.
+  keywordCandidates: defineTable({
+    discoveryId: v.id("discoveryRuns"),
+    keyword: v.string(),
+    kind: v.union(
+      v.literal("category"),
+      v.literal("problem"),
+      v.literal("comparison"),
+      v.literal("longtail"),
+    ),
+    rationale: v.string(), // why the model thinks a buyer would search this
+    status: v.union(
+      v.literal("unvalidated"),
+      v.literal("relevant"),
+      v.literal("irrelevant"),
+      v.literal("ambiguous"),
+    ),
+    createdAt: v.number(),
+  })
+    .index("by_discoveryId", ["discoveryId"])
+    .index("by_discoveryId_and_status", ["discoveryId", "status"]),
 
   // Singleton config, editable from the dashboard; the Worker reads it here so
   // there is one source of truth.

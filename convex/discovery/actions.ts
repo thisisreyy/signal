@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalAction } from "../_generated/server";
+import { env, internalAction, type ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Doc } from "../_generated/dataModel";
 import {
@@ -7,10 +7,13 @@ import {
   classifyError,
   contentHash,
   htmlToText,
+  KEYWORDS_TOOL_SCHEMA,
+  keywordsPrompt,
   MAX_PAGE_BYTES,
   pagesToFetch,
   PROFILE_TOOL_SCHEMA,
   profilePrompt,
+  validateKeywords,
   validateProfile,
 } from "./logic";
 
@@ -24,11 +27,6 @@ import {
  *   - all state advancement happens in mutations, never here
  */
 
-// The Convex action runtime provides process.env; the tsconfig has no Node types.
-declare const process: { env: Record<string, string | undefined> };
-
-type ActionCtx = { runQuery: any; runMutation: any };
-
 export const runStep = internalAction({
   args: { stepId: v.id("discoverySteps") },
   handler: async (ctx, args) => {
@@ -36,13 +34,15 @@ export const runStep = internalAction({
       stepId: args.stepId,
     });
     if (!claimed) return; // already claimed, done, or run is terminal
-    const { step, run } = claimed as { step: Doc<"discoverySteps">; run: Doc<"discoveryRuns"> };
+    const { step, run } = claimed;
 
     try {
       if (step.kind === "FETCH_PAGES") {
         await doFetchPages(ctx, run, step);
       } else if (step.kind === "PROFILE") {
         await doProfile(ctx, run, step);
+      } else if (step.kind === "GENERATE_KEYWORDS") {
+        await doGenerateKeywords(ctx, run, step);
       } else {
         throw new Error(`unknown step kind ${step.kind}`);
       }
@@ -69,9 +69,20 @@ function maybeInjectCrash(
   }
 }
 
+/** Attach an HTTP status so classifyError can call it terminal. */
+function terminal(message: string, status = 422): Error {
+  const err = new Error(message);
+  (err as { httpStatus?: number }).httpStatus = status;
+  return err;
+}
+
 // ---------- FETCH_PAGES ----------
 
-async function doFetchPages(ctx: ActionCtx, run: Doc<"discoveryRuns">, step: Doc<"discoverySteps">) {
+async function doFetchPages(
+  ctx: ActionCtx,
+  run: Doc<"discoveryRuns">,
+  step: Doc<"discoverySteps">,
+) {
   const pages: { url: string; ok: boolean; chars: number }[] = [];
 
   for (const [index, url] of pagesToFetch(run.url).entries()) {
@@ -111,7 +122,7 @@ async function fetchPage(url: string): Promise<{ ok: boolean; status: number; te
     });
     const raw = (await response.text()).slice(0, MAX_PAGE_BYTES);
     return { ok: response.ok, status: response.status, text: htmlToText(raw) };
-  } catch (error) {
+  } catch {
     // A page that doesn't exist (/pricing on a site without one) is data,
     // not a step failure — record it and move on.
     return { ok: false, status: 0, text: "" };
@@ -130,28 +141,34 @@ async function doProfile(ctx: ActionCtx, run: Doc<"discoveryRuns">, step: Doc<"d
     pages.push({ url, ok: cached?.ok ?? false, text: cached?.response?.text ?? "" });
   }
   if (!pages.some((p) => p.ok && p.text.length > 0)) {
-    const err = new Error("no page content could be fetched from the site");
-    (err as { httpStatus?: number }).httpStatus = 422;
-    throw err; // terminal: profiling a site we can't read is guesswork
+    throw terminal("no page content could be fetched from the site");
   }
 
   const prompt = profilePrompt(run.url, pages.map((p) => ({ url: p.url, text: p.text })));
 
   maybeInjectCrash(run, step, "before-ledger");
-  let payload = await llmToolCall(ctx, run, `${run._id}:profile:${contentHash(prompt)}`, prompt);
+  const payload = await llmToolCall(ctx, run, {
+    keyContent: `${run._id}:profile:${contentHash(prompt)}`,
+    prompt,
+    tool: PROFILE_TOOL_SCHEMA,
+    maxTokens: 1200,
+  });
   maybeInjectCrash(run, step, "after-ledger");
 
   let validated = validateProfile(payload);
   if (!validated.ok) {
     // One corrective retry with the validation error, then fail cleanly.
     const fixPrompt = `${prompt}\n\nYour previous output was rejected: ${validated.reason}. Emit the profile again, following the schema exactly.`;
-    payload = await llmToolCall(ctx, run, `${run._id}:profile-fix:${contentHash(fixPrompt)}`, fixPrompt);
-    validated = validateProfile(payload);
+    const retry = await llmToolCall(ctx, run, {
+      keyContent: `${run._id}:profile-fix:${contentHash(fixPrompt)}`,
+      prompt: fixPrompt,
+      tool: PROFILE_TOOL_SCHEMA,
+      maxTokens: 1200,
+    });
+    validated = validateProfile(retry);
   }
   if (!validated.ok) {
-    const err = new Error(`LLM produced malformed profile twice: ${validated.reason}`);
-    (err as { httpStatus?: number }).httpStatus = 422;
-    throw err; // terminal by classification
+    throw terminal(`LLM produced malformed profile twice: ${validated.reason}`);
   }
 
   await ctx.runMutation(internal.discovery.index.completeProfileStep, {
@@ -161,23 +178,72 @@ async function doProfile(ctx: ActionCtx, run: Doc<"discoveryRuns">, step: Doc<"d
   });
 }
 
-/** One ledger-cached, schema-forced LLM call. Returns the tool payload. */
+// ---------- GENERATE_KEYWORDS ----------
+
+async function doGenerateKeywords(
+  ctx: ActionCtx,
+  run: Doc<"discoveryRuns">,
+  step: Doc<"discoverySteps">,
+) {
+  const profile = await ctx.runQuery(internal.discovery.index.getProfileForRun, {
+    discoveryId: run._id,
+  });
+  if (!profile) {
+    // Structurally impossible via the normal path (completeProfileStep writes
+    // the profile and creates this step in one transaction), so if it happens
+    // the pipeline is wrong, not the provider — terminal, not retryable.
+    throw terminal("no business profile exists for this run");
+  }
+
+  const prompt = keywordsPrompt(run.url, profile);
+
+  maybeInjectCrash(run, step, "before-ledger");
+  const payload = await llmToolCall(ctx, run, {
+    keyContent: `${run._id}:keywords:${contentHash(prompt)}`,
+    prompt,
+    tool: KEYWORDS_TOOL_SCHEMA,
+    maxTokens: 3000,
+  });
+  maybeInjectCrash(run, step, "after-ledger");
+
+  let validated = validateKeywords(payload);
+  if (!validated.ok) {
+    const fixPrompt = `${prompt}\n\nYour previous output was rejected: ${validated.reason}. Emit the keyword list again, following the schema and the required mix exactly.`;
+    const retry = await llmToolCall(ctx, run, {
+      keyContent: `${run._id}:keywords-fix:${contentHash(fixPrompt)}`,
+      prompt: fixPrompt,
+      tool: KEYWORDS_TOOL_SCHEMA,
+      maxTokens: 3000,
+    });
+    validated = validateKeywords(retry);
+  }
+  if (!validated.ok) {
+    throw terminal(`LLM produced malformed keywords twice: ${validated.reason}`);
+  }
+
+  await ctx.runMutation(internal.discovery.index.completeKeywordsStep, {
+    stepId: step._id,
+    keywords: validated.keywords,
+  });
+}
+
+// ---------- The one LLM entry point ----------
+
+/** One ledger-cached, schema-forced tool call. Returns the tool payload. */
 async function llmToolCall(
   ctx: ActionCtx,
   run: Doc<"discoveryRuns">,
-  keyContent: string,
-  prompt: string,
+  opts: { keyContent: string; prompt: string; tool: unknown; maxTokens: number },
 ): Promise<unknown> {
-  const key = callKey("llm", keyContent);
+  const key = callKey("llm", opts.keyContent);
   const cached = await ctx.runQuery(internal.discovery.index.getExternalCall, { callKey: key });
   if (cached) return cached.response;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    const err = new Error("ANTHROPIC_API_KEY is not set in the Convex deployment");
-    (err as { httpStatus?: number }).httpStatus = 401;
-    throw err;
+    throw terminal("ANTHROPIC_API_KEY is not set in the Convex deployment", 401);
   }
+  const model = env.LLM_MODEL ?? "claude-haiku-4-5";
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -187,23 +253,22 @@ async function llmToolCall(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.LLM_MODEL ?? "claude-haiku-4-5",
-      max_tokens: 1200,
-      tools: [PROFILE_TOOL_SCHEMA],
-      tool_choice: { type: "tool", name: PROFILE_TOOL_SCHEMA.name },
-      messages: [{ role: "user", content: prompt }],
+      model,
+      max_tokens: opts.maxTokens,
+      tools: [opts.tool],
+      tool_choice: { type: "tool", name: (opts.tool as { name: string }).name },
+      messages: [{ role: "user", content: opts.prompt }],
     }),
-    signal: AbortSignal.timeout(60_000),
+    signal: AbortSignal.timeout(90_000),
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+    // Never log or surface the key; only status and provider message.
     const err = new Error(`LLM API ${response.status}: ${body.slice(0, 200)}`);
     (err as { httpStatus?: number }).httpStatus = response.status;
     throw err;
   }
-  const json = (await response.json()) as {
-    content?: { type: string; input?: unknown }[];
-  };
+  const json = (await response.json()) as { content?: { type: string; input?: unknown }[] };
   const tool = json.content?.find((block) => block.type === "tool_use");
   const payload = tool?.input ?? null;
 
@@ -211,7 +276,7 @@ async function llmToolCall(
     callKey: key,
     kind: "llm",
     discoveryId: run._id,
-    request: `messages ${process.env.LLM_MODEL ?? "claude-haiku-4-5"} (${prompt.length} chars)`,
+    request: `messages ${model} (${opts.prompt.length} chars)`,
     response: payload,
     ok: payload !== null,
   });

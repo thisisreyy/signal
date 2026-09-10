@@ -4,18 +4,23 @@ import {
   internalQuery,
   mutation,
   query,
+  type MutationCtx,
 } from "../_generated/server";
 import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
   backoffMs,
   IMPLEMENTED_FRONTIER,
+  KEYWORD_KINDS,
   MAX_ATTEMPTS,
   MAX_FETCH_CALLS,
   MAX_LLM_CALLS,
+  nextStepKind,
   STEP_STALE_MS,
   stepKey,
   type BusinessProfileFields,
+  type DiscoveryState,
+  type StepKind,
 } from "./logic";
 
 /**
@@ -50,6 +55,8 @@ import {
  *   worst case "spend one extra credit", never "corrupt state".
  */
 
+const STEP_SCAN_LIMIT = 200;
+
 // ---------- Starting a run ----------
 
 export const start = mutation({
@@ -71,7 +78,7 @@ export const start = mutation({
     const existing = await ctx.db
       .query("discoveryRuns")
       .withIndex("by_url", (q) => q.eq("url", url))
-      .collect();
+      .take(20);
     const active = existing.find((r) => r.state !== "COMPLETE" && r.state !== "FAILED");
     if (active) return { discoveryId: active._id, created: false };
 
@@ -103,15 +110,15 @@ function normalizeUrl(raw: string): string | null {
 
 /** Intent + schedule, atomically. The heart of the outbox. */
 async function insertStepAndSchedule(
-  ctx: { db: any; scheduler: any },
+  ctx: MutationCtx,
   discoveryId: Id<"discoveryRuns">,
-  kind: string,
+  kind: StepKind,
   input: string,
-) {
-  const key = stepKey(discoveryId, kind as never, input);
+): Promise<Id<"discoverySteps">> {
+  const key = stepKey(discoveryId, kind, input);
   const existing = await ctx.db
     .query("discoverySteps")
-    .withIndex("by_stepKey", (q: any) => q.eq("stepKey", key))
+    .withIndex("by_stepKey", (q) => q.eq("stepKey", key))
     .unique();
   if (existing) return existing._id; // derived key: re-creating intent is a no-op
 
@@ -144,7 +151,12 @@ export const claimStep = internalMutation({
         errorClass: "terminal",
         error: "per-run cost cap exceeded",
       });
-      await ctx.db.patch(run._id, { state: "FAILED", error: "cost cap exceeded", updatedAt: Date.now() });
+      await ctx.db.patch(run._id, {
+        state: "FAILED",
+        stateBeforeFailure: run.state as Exclude<DiscoveryState, "COMPLETE" | "FAILED">,
+        error: "cost cap exceeded",
+        updatedAt: Date.now(),
+      });
       return null;
     }
 
@@ -203,6 +215,16 @@ export const getExternalCall = internalQuery({
   },
 });
 
+export const getProfileForRun = internalQuery({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("businessProfiles")
+      .withIndex("by_discovery", (q) => q.eq("discoveryId", args.discoveryId))
+      .unique();
+  },
+});
+
 /** FETCH_PAGES done → record summary, create PROFILE intent. One transaction. */
 export const completeFetchStep = internalMutation({
   args: {
@@ -212,14 +234,22 @@ export const completeFetchStep = internalMutation({
   handler: async (ctx, args) => {
     const step = await ctx.db.get(args.stepId);
     if (!step || step.status !== "running") return; // late duplicate: no-op
-    await ctx.db.patch(step._id, { status: "done", doneAt: Date.now(), result: { pages: args.pages } });
+    await ctx.db.patch(step._id, {
+      status: "done",
+      doneAt: Date.now(),
+      result: { pages: args.pages },
+    });
     const run = await ctx.db.get(step.discoveryId);
     if (!run) return;
     await insertStepAndSchedule(ctx, run._id, "PROFILE", run.url);
   },
 });
 
-/** PROFILE done → store profile, advance the state machine. One transaction. */
+/**
+ * PROFILE done → store the profile, advance to GENERATING_KEYWORDS, and
+ * create that phase's intent. All one transaction: the run can never be in
+ * "profiled but nothing will generate keywords".
+ */
 export const completeProfileStep = internalMutation({
   args: {
     stepId: v.id("discoverySteps"),
@@ -248,10 +278,64 @@ export const completeProfileStep = internalMutation({
       createdAt: Date.now(),
     });
     await ctx.db.patch(step._id, { status: "done", doneAt: Date.now() });
-    // Advance to the implementation frontier: Phase 2 will pick up from here.
     await ctx.db.patch(run._id, { state: "GENERATING_KEYWORDS", updatedAt: Date.now() });
+    await insertStepAndSchedule(ctx, run._id, "GENERATE_KEYWORDS", run.url);
   },
 });
+
+/**
+ * GENERATE_KEYWORDS done → store candidates as UNVALIDATED and advance to
+ * VALIDATING. Nothing here is tracked: these are hypotheses awaiting Phase 3,
+ * which is why status is not a boolean and config is left untouched.
+ */
+export const completeKeywordsStep = internalMutation({
+  args: {
+    stepId: v.id("discoverySteps"),
+    keywords: v.array(
+      v.object({
+        keyword: v.string(),
+        kind: v.union(...KEYWORD_KINDS.map((k) => v.literal(k))),
+        rationale: v.string(),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step || step.status !== "running") return;
+    const run = await ctx.db.get(step.discoveryId);
+    if (!run) return;
+
+    // Re-running this step (a healed crash) must not duplicate candidates.
+    const existing = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", run._id))
+      .take(MAX_CANDIDATES);
+    const known = new Set(existing.map((c) => c.keyword));
+
+    const now = Date.now();
+    for (const candidate of args.keywords) {
+      if (known.has(candidate.keyword)) continue;
+      await ctx.db.insert("keywordCandidates", {
+        discoveryId: run._id,
+        keyword: candidate.keyword,
+        kind: candidate.kind,
+        rationale: candidate.rationale,
+        status: "unvalidated",
+        createdAt: now,
+      });
+    }
+    await ctx.db.patch(step._id, {
+      status: "done",
+      doneAt: now,
+      result: { generated: args.keywords.length },
+    });
+    // VALIDATING is the implemented frontier: the run parks here awaiting
+    // Phase 3 rather than pretending to be COMPLETE.
+    await ctx.db.patch(run._id, { state: "VALIDATING", updatedAt: now });
+  },
+});
+
+const MAX_CANDIDATES = 100;
 
 /** Failure path: retryable → backoff + re-pend; terminal → run FAILED. */
 export const failStep = internalMutation({
@@ -281,11 +365,73 @@ export const failStep = internalMutation({
       errorClass: args.errorClass,
       doneAt: Date.now(),
     });
-    await ctx.db.patch(step.discoveryId, {
+    const run = await ctx.db.get(step.discoveryId);
+    if (!run || run.state === "FAILED" || run.state === "COMPLETE") return;
+    await ctx.db.patch(run._id, {
       state: "FAILED",
+      stateBeforeFailure: run.state as Exclude<DiscoveryState, "COMPLETE" | "FAILED">,
       error: `${step.kind}: ${args.error}${exhausted ? " (retries exhausted)" : ""}`,
       updatedAt: Date.now(),
     });
+  },
+});
+
+// ---------- Resume: a crashed or parked run restarts from its stored state ----------
+
+export const resume = mutation({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const run = await ctx.db.get(args.discoveryId);
+    if (!run) throw new Error("discovery run not found");
+    if (run.state === "COMPLETE") return { resumed: false, reason: "run is COMPLETE" };
+
+    // A FAILED run resumes at the phase it failed in — which is why the
+    // failure path records stateBeforeFailure instead of erasing it.
+    const state: DiscoveryState =
+      run.state === "FAILED" ? (run.stateBeforeFailure ?? "PROFILING") : run.state;
+
+    const steps = await ctx.db
+      .query("discoverySteps")
+      .withIndex("by_discovery", (q) => q.eq("discoveryId", run._id))
+      .take(STEP_SCAN_LIMIT);
+    const active = steps.find((s) => s.status === "pending" || s.status === "running");
+    if (active) {
+      return { resumed: false, reason: `${active.kind} is already ${active.status}` };
+    }
+
+    const doneKinds = steps.filter((s) => s.status === "done").map((s) => s.kind);
+    const kind = nextStepKind(state, doneKinds);
+    if (!kind) {
+      return { resumed: false, reason: `${state} is at the implemented frontier` };
+    }
+
+    if (run.state === "FAILED") {
+      await ctx.db.patch(run._id, {
+        state,
+        error: undefined,
+        stateBeforeFailure: undefined,
+        updatedAt: Date.now(),
+      });
+    }
+
+    // A previously failed step for this kind is reset rather than skipped —
+    // a human resuming is an explicit decision to grant fresh attempts.
+    const failed = steps.find((s) => s.kind === kind && s.status === "failed");
+    if (failed) {
+      await ctx.db.patch(failed._id, {
+        status: "pending",
+        attempts: 0,
+        error: undefined,
+        errorClass: undefined,
+        nextAttemptAt: undefined,
+      });
+      await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, {
+        stepId: failed._id,
+      });
+    } else {
+      await insertStepAndSchedule(ctx, run._id, kind, run.url);
+    }
+    return { resumed: true, kind };
   },
 });
 
@@ -300,11 +446,13 @@ export const sweep = internalMutation({
     const pending = await ctx.db
       .query("discoverySteps")
       .withIndex("by_status", (q) => q.eq("status", "pending"))
-      .collect();
+      .take(STEP_SCAN_LIMIT);
     for (const step of pending) {
       if (step.nextAttemptAt !== undefined && step.nextAttemptAt <= now) {
         await ctx.db.patch(step._id, { nextAttemptAt: undefined });
-        await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, { stepId: step._id });
+        await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, {
+          stepId: step._id,
+        });
       }
     }
 
@@ -314,25 +462,50 @@ export const sweep = internalMutation({
     const running = await ctx.db
       .query("discoverySteps")
       .withIndex("by_status", (q) => q.eq("status", "running"))
-      .collect();
+      .take(STEP_SCAN_LIMIT);
     for (const step of running) {
-      if ((step.startedAt ?? 0) < now - STEP_STALE_MS) {
-        if (step.attempts >= MAX_ATTEMPTS) {
-          await ctx.db.patch(step._id, {
-            status: "failed",
-            error: "crashed repeatedly; retries exhausted",
-            errorClass: "terminal",
-            doneAt: now,
-          });
-          await ctx.db.patch(step.discoveryId, {
+      if ((step.startedAt ?? 0) >= now - STEP_STALE_MS) continue;
+      if (step.attempts >= MAX_ATTEMPTS) {
+        await ctx.db.patch(step._id, {
+          status: "failed",
+          error: "crashed repeatedly; retries exhausted",
+          errorClass: "terminal",
+          doneAt: now,
+        });
+        const run = await ctx.db.get(step.discoveryId);
+        if (run && run.state !== "FAILED" && run.state !== "COMPLETE") {
+          await ctx.db.patch(run._id, {
             state: "FAILED",
+            stateBeforeFailure: run.state as Exclude<DiscoveryState, "COMPLETE" | "FAILED">,
             error: `${step.kind}: crashed repeatedly`,
             updatedAt: now,
           });
-        } else {
-          await ctx.db.patch(step._id, { status: "pending" });
-          await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, { stepId: step._id });
         }
+      } else {
+        await ctx.db.patch(step._id, { status: "pending" });
+        await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, {
+          stepId: step._id,
+        });
+      }
+    }
+
+    // Parked runs: a live state whose next step simply doesn't exist. This is
+    // how a run picks up when a later pipeline phase is deployed, and the
+    // backstop if an intent were ever lost.
+    for (const state of ["PROFILING", "GENERATING_KEYWORDS"] as const) {
+      const runs = await ctx.db
+        .query("discoveryRuns")
+        .withIndex("by_state", (q) => q.eq("state", state))
+        .take(50);
+      for (const run of runs) {
+        if (run.updatedAt > now - 60_000) continue; // let in-flight work settle
+        const steps = await ctx.db
+          .query("discoverySteps")
+          .withIndex("by_discovery", (q) => q.eq("discoveryId", run._id))
+          .take(STEP_SCAN_LIMIT);
+        if (steps.some((s) => s.status !== "done")) continue; // active or failed: not ours
+        const kind = nextStepKind(state, steps.map((s) => s.kind));
+        if (kind) await insertStepAndSchedule(ctx, run._id, kind, run.url);
       }
     }
   },
@@ -348,19 +521,23 @@ export const getRun = query({
     const steps = await ctx.db
       .query("discoverySteps")
       .withIndex("by_discovery", (q) => q.eq("discoveryId", args.discoveryId))
-      .collect();
+      .take(STEP_SCAN_LIMIT);
     const profile = await ctx.db
       .query("businessProfiles")
       .withIndex("by_discovery", (q) => q.eq("discoveryId", args.discoveryId))
       .unique();
-    return { run, steps, profile, implementedFrontier: IMPLEMENTED_FRONTIER };
+    const candidates = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(MAX_CANDIDATES);
+    return { run, steps, profile, candidates, implementedFrontier: IMPLEMENTED_FRONTIER };
   },
 });
 
 export const listRuns = query({
   args: {},
   handler: async (ctx) => {
-    const runs = await ctx.db.query("discoveryRuns").collect();
-    return runs.sort((a, b) => b.createdAt - a.createdAt).slice(0, 20);
+    // Newest first via the built-in creation-time index — no JS sorting.
+    return await ctx.db.query("discoveryRuns").order("desc").take(20);
   },
 });
