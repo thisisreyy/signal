@@ -390,3 +390,80 @@ describe("discovery: the read surface the UI depends on", () => {
     expect(config!.competitors).toEqual(["rival.com"]); // reddit never reaches tracking
   });
 });
+
+describe("bugfix: a recorded failure never becomes permanent", () => {
+  test("a retry that succeeds replaces the failed response instead of discarding it", async () => {
+    const t = convexTest(schema, modules);
+    const { discoveryId } = await t.mutation(api.discovery.index.start, { url: "https://acme.com" });
+
+    // First attempt: the page fetch failed (a timeout looks exactly like this).
+    await t.mutation(internal.discovery.index.recordExternalCall, {
+      callKey: "fetch:abc",
+      kind: "fetch",
+      discoveryId,
+      request: "GET https://acme.com",
+      response: { ok: false, status: 0, text: "" },
+      ok: false,
+    });
+    // Retry succeeds.
+    await t.mutation(internal.discovery.index.recordExternalCall, {
+      callKey: "fetch:abc",
+      kind: "fetch",
+      discoveryId,
+      request: "GET https://acme.com",
+      response: { ok: true, status: 200, text: "real page content" },
+      ok: true,
+    });
+
+    const entry = await t.query(internal.discovery.index.getExternalCall, { callKey: "fetch:abc" });
+    expect(entry!.ok).toBe(true);
+    expect(entry!.response.text).toBe("real page content");
+
+    const run = await t.run((ctx) => ctx.db.get(discoveryId));
+    expect(run!.fetchCalls).toBe(2); // both calls really happened; count honestly
+  });
+
+  test("a success is never overwritten by a later failure", async () => {
+    const t = convexTest(schema, modules);
+    const { discoveryId } = await t.mutation(api.discovery.index.start, { url: "https://acme.com" });
+    const args = {
+      callKey: "llm:xyz",
+      kind: "llm" as const,
+      discoveryId,
+      request: "messages",
+    };
+    await t.mutation(internal.discovery.index.recordExternalCall, {
+      ...args,
+      response: { good: true },
+      ok: true,
+    });
+    await t.mutation(internal.discovery.index.recordExternalCall, {
+      ...args,
+      response: null,
+      ok: false,
+    });
+
+    const entry = await t.query(internal.discovery.index.getExternalCall, { callKey: "llm:xyz" });
+    expect(entry!.ok).toBe(true);
+    expect(entry!.response).toEqual({ good: true });
+  });
+});
+
+describe("bugfix: cost caps stop AT the cap, not one past it", () => {
+  test("a run sitting exactly at its search cap cannot claim another step", async () => {
+    const t = convexTest(schema, modules);
+    const { discoveryId } = await t.mutation(api.discovery.index.start, { url: "https://acme.com" });
+    await t.run((ctx) => ctx.db.patch(discoveryId, { searchCalls: 40 })); // exactly MAX
+
+    const stepId = await t.run(async (ctx) => {
+      const s = await ctx.db
+        .query("discoverySteps")
+        .withIndex("by_discovery", (q) => q.eq("discoveryId", discoveryId))
+        .first();
+      return s!._id;
+    });
+    expect(await t.mutation(internal.discovery.index.claimStep, { stepId })).toBeNull();
+    const run = await t.run((ctx) => ctx.db.get(discoveryId));
+    expect(run!.state).toBe("FAILED");
+  });
+});

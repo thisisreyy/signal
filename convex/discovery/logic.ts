@@ -119,7 +119,7 @@ export const STEP_STALE_MS = 3 * 60_000;
 
 // ---------- Cost caps (per discovery run) ----------
 
-export const MAX_FETCH_CALLS = 8;
+export const MAX_FETCH_CALLS = 16;
 /** Phase 3 classifies a whole batch per call, so 23 keywords cost ~6 calls. */
 export const MAX_LLM_CALLS = 30;
 /** Hard per-run ceiling on paid searches — the cap the requirements demand. */
@@ -320,6 +320,16 @@ export const KEYWORDS_TOOL_SCHEMA = {
   },
 } as const;
 
+/**
+ * A query pinned to a past year ("best crm tools 2024") is rotted: it costs a
+ * real search to validate and drags stale results into the competitor set.
+ * The year is passed in rather than read from the clock so this stays pure.
+ */
+export function hasStaleYear(keyword: string, currentYear: number): boolean {
+  const years = keyword.match(/\b(19|20)\d{2}\b/g);
+  return years !== null && years.some((y) => Number(y) < currentYear);
+}
+
 /** Lowercase, collapse whitespace, strip wrapping quotes. */
 export function normalizeKeyword(raw: string): string {
   return raw
@@ -338,6 +348,7 @@ export function normalizeKeyword(raw: string): string {
  */
 export function validateKeywords(
   raw: unknown,
+  currentYear: number = new Date().getUTCFullYear(),
 ): { ok: true; keywords: KeywordCandidate[] } | { ok: false; reason: string } {
   if (typeof raw !== "object" || raw === null) {
     return { ok: false, reason: "payload is not an object" };
@@ -371,6 +382,7 @@ export function validateKeywords(
     if (keyword.length < 2 || keyword.length > MAX_KEYWORD_CHARS) {
       return { ok: false, reason: `item ${i}: keyword length out of range` };
     }
+    if (hasStaleYear(keyword, currentYear)) continue; // rotted query, drop it
     if (seen.has(keyword)) continue; // duplicates are noise, not failure
     seen.add(keyword);
     keywords.push({
@@ -421,6 +433,7 @@ Rules:
 - Do NOT include this business's own brand name. We are looking for demand they could capture from strangers, not people already searching for them.
 - For comparison queries, only name companies you are reasonably confident actually exist in this market.
 - Keep each query 2-8 words, lowercase.
+- Do not put a year in a query. It rots, and the search happens today.
 - These are hypotheses. Real search results will test them next, so breadth matters more than certainty.`;
 }
 
@@ -603,8 +616,6 @@ Judge only from the ranking domains shown. They are the evidence; the query's wo
 export const DEFAULT_TOP_COMPETITORS = 5;
 /** Ceiling on domains sent to the classifier, so one call always suffices. */
 export const MAX_DOMAINS_TO_CLASSIFY = 30;
-/** A domain seen on only one keyword is noise, not a competitive pattern. */
-export const MIN_APPEARANCES = 1;
 
 /**
  * Domains that rank constantly but are never the competition. Kept as a
@@ -892,6 +903,7 @@ export function rankCompetitors<
 >(classified: readonly T[], topN: number = DEFAULT_TOP_COMPETITORS): (T & { rank: number; selected: boolean })[] {
   return classified
     .filter((c) => c.classification === "competitor")
-    .sort((a, b) => b.score - a.score)
+    // Domain breaks score ties so the ranking is stable run to run.
+    .sort((a, b) => b.score - a.score || a.domain.localeCompare(b.domain))
     .map((c, index) => ({ ...c, rank: index + 1, selected: index < topN }));
 }

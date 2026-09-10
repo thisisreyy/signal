@@ -172,9 +172,11 @@ export const claimStep = internalMutation({
 
     // Cost caps, enforced transactionally before any spend.
     if (
-      run.fetchCalls > MAX_FETCH_CALLS ||
-      run.llmCalls > MAX_LLM_CALLS ||
-      run.searchCalls > MAX_SEARCH_CALLS
+      // >= not >: this runs BEFORE a step that will spend more, so a run
+      // sitting exactly at its cap must stop rather than exceed it by one.
+      run.fetchCalls >= MAX_FETCH_CALLS ||
+      run.llmCalls >= MAX_LLM_CALLS ||
+      run.searchCalls >= MAX_SEARCH_CALLS
     ) {
       await ctx.db.patch(step._id, {
         status: "failed",
@@ -214,7 +216,27 @@ export const recordExternalCall = internalMutation({
       .query("externalCalls")
       .withIndex("by_callKey", (q) => q.eq("callKey", args.callKey))
       .unique();
-    if (existing) return existing._id; // retry after window (c): no double record
+    if (existing) {
+      // A retry that finally succeeded must replace a recorded failure —
+      // otherwise the good result is silently discarded and the run keeps
+      // reading the failed one. Successes are never overwritten.
+      if (!existing.ok && args.ok) {
+        await ctx.db.patch(existing._id, {
+          response: args.response,
+          ok: true,
+          request: args.request,
+          createdAt: Date.now(),
+        });
+        const run = await ctx.db.get(args.discoveryId);
+        if (run) {
+          const field =
+            args.kind === "fetch" ? "fetchCalls" : args.kind === "llm" ? "llmCalls" : "searchCalls";
+          // The retry really was a second call; count the spend honestly.
+          await ctx.db.patch(run._id, { [field]: run[field] + 1, updatedAt: Date.now() });
+        }
+      }
+      return existing._id; // retry after window (c): no double record
+    }
 
     const id = await ctx.db.insert("externalCalls", {
       callKey: args.callKey,

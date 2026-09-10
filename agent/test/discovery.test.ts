@@ -579,3 +579,58 @@ describe("registrableDomain robustness", () => {
     expect(registrableDomain("https://docs.saasquatch.com/guide")).toBe("saasquatch.com");
   });
 });
+
+// ---------- Regression tests for fixed bugs ----------
+
+import { hasStaleYear, MAX_FETCH_CALLS } from "../../convex/discovery/logic";
+
+describe("bugfix: stale-year keywords are dropped", () => {
+  test("a query pinned to a past year is rotted", () => {
+    expect(hasStaleYear("best marketing automation tools 2024", 2026)).toBe(true);
+    expect(hasStaleYear("crm software 2019", 2026)).toBe(true);
+  });
+
+  test("the current year, or no year at all, is fine", () => {
+    expect(hasStaleYear("best crm tools 2026", 2026)).toBe(false);
+    expect(hasStaleYear("marketing automation software", 2026)).toBe(false);
+  });
+
+  test("a number that isn't a year is not mistaken for one", () => {
+    expect(hasStaleYear("top 10 crm tools", 2026)).toBe(false);
+    expect(hasStaleYear("g2 crm", 2026)).toBe(false);
+  });
+
+  test("validateKeywords silently drops stale ones instead of failing", () => {
+    const list = makeKeywords(16);
+    list[0]!.keyword = "best marketing automation tools 2024";
+    const result = validateKeywords({ keywords: list }, 2026);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.keywords.map((k) => k.keyword)).not.toContain(
+        "best marketing automation tools 2024",
+      );
+      expect(result.keywords).toHaveLength(15);
+    }
+  });
+});
+
+describe("bugfix: competitor ranking is deterministic on ties", () => {
+  test("equal scores always order the same way", () => {
+    const tied = [
+      { domain: "zzz.com", classification: "competitor" as const, score: 5 },
+      { domain: "aaa.com", classification: "competitor" as const, score: 5 },
+    ];
+    expect(rankCompetitors(tied, 5).map((r) => r.domain)).toEqual(["aaa.com", "zzz.com"]);
+    expect(rankCompetitors([...tied].reverse(), 5).map((r) => r.domain)).toEqual([
+      "aaa.com",
+      "zzz.com",
+    ]);
+  });
+});
+
+describe("bugfix: fetch budget has headroom for re-attempts", () => {
+  test("a failed page can be retried without tripping the cap", () => {
+    // 4 pages per run; failures now re-attempt rather than caching forever.
+    expect(MAX_FETCH_CALLS).toBeGreaterThanOrEqual(4 * 3);
+  });
+});

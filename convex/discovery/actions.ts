@@ -107,9 +107,13 @@ async function doFetchPages(
   for (const [index, url] of pagesToFetch(run.url).entries()) {
     const key = callKey("fetch", `${run._id}:${url}`);
     const cached = await ctx.runQuery(internal.discovery.index.getExternalCall, { callKey: key });
-    if (cached) {
-      pages.push({ url, ok: cached.ok, chars: cached.response?.text?.length ?? 0 });
-      continue; // healed retry: the call already happened, don't re-pay
+    // Only a SUCCESSFUL call is authoritative. Reusing a cached failure would
+    // make one transient timeout permanent for the life of the run — and
+    // since fetchPage turns every error into {ok:false}, that could fail a
+    // run outright on a site that is actually fine.
+    if (cached?.ok) {
+      pages.push({ url, ok: true, chars: cached.response?.text?.length ?? 0 });
+      continue; // healed retry: the call already succeeded, don't re-pay
     }
 
     if (index === 0) maybeInjectCrash(run, step, "before-ledger");
@@ -256,7 +260,11 @@ async function llmToolCall(
 ): Promise<unknown> {
   const key = callKey("llm", opts.keyContent);
   const cached = await ctx.runQuery(internal.discovery.index.getExternalCall, { callKey: key });
-  if (cached) return cached.response;
+  // Same rule as fetches: never reuse a failed call. A response with no tool
+  // block records ok:false, and reusing it would make both the original call
+  // and its corrective retry return the same null — guaranteeing a terminal
+  // failure that no retry could ever recover from.
+  if (cached?.ok) return cached.response;
 
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey) {
