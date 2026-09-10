@@ -11,5 +11,6 @@ export default defineApp({
   env: {
     ANTHROPIC_API_KEY: v.optional(v.string()),
     LLM_MODEL: v.optional(v.string()),
+    SERPER_API_KEY: v.optional(v.string()),
   },
 });

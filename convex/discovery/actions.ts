@@ -13,8 +13,15 @@ import {
   pagesToFetch,
   PROFILE_TOOL_SCHEMA,
   profilePrompt,
+  SEARCH_CACHE_MS,
+  SEARCH_PACING_MS,
+  toSerpDomains,
   validateKeywords,
   validateProfile,
+  validateVerdicts,
+  VERDICTS_TOOL_SCHEMA,
+  verdictsPrompt,
+  type SerpDomain,
 } from "./logic";
 
 /**
@@ -43,6 +50,8 @@ export const runStep = internalAction({
         await doProfile(ctx, run, step);
       } else if (step.kind === "GENERATE_KEYWORDS") {
         await doGenerateKeywords(ctx, run, step);
+      } else if (step.kind === "VALIDATE_BATCH") {
+        await doValidateBatch(ctx, run, step);
       } else {
         throw new Error(`unknown step kind ${step.kind}`);
       }
@@ -281,4 +290,177 @@ async function llmToolCall(
     ok: payload !== null,
   });
   return payload;
+}
+
+// ---------- VALIDATE_BATCH ----------
+
+/**
+ * Validate one small batch of candidate keywords against real search results.
+ *
+ * Sequential by design: the provider allows 5 queries/second, and firing a
+ * step per keyword would breach that, make every action contend on the same
+ * run document, and cost one LLM call per keyword instead of one per batch.
+ *
+ * Failure policy mirrors the daily tracker: a single keyword that cannot be
+ * searched or classified is recorded as errored DATA and the batch carries
+ * on. Only a batch where nothing at all succeeded is a step failure.
+ */
+async function doValidateBatch(
+  ctx: ActionCtx,
+  run: Doc<"discoveryRuns">,
+  step: Doc<"discoverySteps">,
+) {
+  const profile = await ctx.runQuery(internal.discovery.index.getProfileForRun, {
+    discoveryId: run._id,
+  });
+  if (!profile) throw terminal("no business profile exists for this run");
+
+  const batch = await ctx.runQuery(internal.discovery.index.getValidationBatch, {
+    discoveryId: run._id,
+  });
+  if (batch.length === 0) {
+    // Nothing left to do (a healed retry after the batch already landed).
+    await ctx.runMutation(internal.discovery.index.completeValidationBatch, {
+      stepId: step._id,
+      results: [],
+    });
+    return;
+  }
+
+  const apiKey = env.SERPER_API_KEY;
+  if (!apiKey) throw terminal("SERPER_API_KEY is not set in the Convex deployment", 401);
+
+  type Searched = { keyword: string; domains: SerpDomain[]; error?: string };
+  const searched: Searched[] = [];
+
+  maybeInjectCrash(run, step, "before-ledger");
+  for (const [index, keyword] of batch.entries()) {
+    // Searches are keyed by CONTENT ONLY, not by run — two businesses sharing
+    // a keyword, or a re-run of the same discovery, reuse the same result for
+    // 24 hours instead of paying twice.
+    const key = callKey("serper", keyword);
+    const cached = await ctx.runQuery(internal.discovery.index.getExternalCall, {
+      callKey: key,
+      maxAgeMs: SEARCH_CACHE_MS,
+      now: Date.now(),
+    });
+    if (cached?.ok) {
+      searched.push({ keyword, domains: (cached.response?.domains ?? []) as SerpDomain[] });
+      continue;
+    }
+
+    if (index > 0) await sleep(SEARCH_PACING_MS); // stay under 5 queries/sec
+    try {
+      const domains = await serperSearch(keyword, apiKey);
+      await ctx.runMutation(internal.discovery.index.recordExternalCall, {
+        callKey: key,
+        kind: "serper",
+        discoveryId: run._id,
+        request: `search "${keyword}"`,
+        response: { domains },
+        ok: true,
+      });
+      searched.push({ keyword, domains });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = (error as { httpStatus?: number }).httpStatus;
+      // A dead or unauthorized key is not a per-keyword problem — stop now.
+      if (status === 401 || status === 403) throw error;
+      // First attempt: let a transient failure retry the whole batch (already
+      // cached searches are not re-paid). By the second attempt, stop letting
+      // one bad keyword hold up the rest.
+      if (step.attempts < 2 && classifyError(message, status) === "retryable") throw error;
+      searched.push({ keyword, domains: [], error: message.slice(0, 200) });
+    }
+  }
+  maybeInjectCrash(run, step, "after-ledger");
+
+  const searchable = searched.filter((s) => !s.error);
+  if (searchable.length === 0) {
+    throw new Error(`every search in the batch failed: ${searched[0]?.error ?? "unknown"}`);
+  }
+
+  // ONE classification call for the whole batch — this is what keeps the
+  // per-run LLM cost proportional to batches, not keywords.
+  const prompt = verdictsPrompt(profile, searchable);
+  let parsed = validateVerdicts(
+    await llmToolCall(ctx, run, {
+      keyContent: `${run._id}:verdicts:${contentHash(prompt)}`,
+      prompt,
+      tool: VERDICTS_TOOL_SCHEMA,
+      maxTokens: 2000,
+    }),
+  );
+  if (!parsed.ok) {
+    const fixPrompt = `${prompt}\n\nYour previous output was rejected: ${parsed.reason}. Emit the verdicts again, following the schema exactly.`;
+    parsed = validateVerdicts(
+      await llmToolCall(ctx, run, {
+        keyContent: `${run._id}:verdicts-fix:${contentHash(fixPrompt)}`,
+        prompt: fixPrompt,
+        tool: VERDICTS_TOOL_SCHEMA,
+        maxTokens: 2000,
+      }),
+    );
+  }
+
+  const byKeyword = new Map(parsed.ok ? parsed.verdicts.map((v) => [v.keyword, v]) : []);
+  const results = searched.map((s) => {
+    if (s.error) {
+      return {
+        keyword: s.keyword,
+        status: "error" as const,
+        reasoning: "The search for this keyword could not be completed.",
+        error: s.error,
+        topDomains: [],
+      };
+    }
+    const verdict = byKeyword.get(s.keyword);
+    if (!verdict) {
+      // Uncovered by the classifier: recorded as errored so the batch always
+      // makes progress instead of looping on the same keyword forever.
+      return {
+        keyword: s.keyword,
+        status: "error" as const,
+        reasoning: "The classifier returned no verdict for this keyword.",
+        error: parsed.ok ? "missing verdict" : parsed.reason,
+        topDomains: s.domains,
+      };
+    }
+    return {
+      keyword: s.keyword,
+      status: verdict.verdict,
+      reasoning: verdict.reasoning,
+      confidence: verdict.confidence,
+      topDomains: s.domains,
+    };
+  });
+
+  await ctx.runMutation(internal.discovery.index.completeValidationBatch, {
+    stepId: step._id,
+    results,
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One real Google search via Serper, trimmed to the evidence we keep. */
+async function serperSearch(keyword: string, apiKey: string): Promise<SerpDomain[]> {
+  const response = await fetch("https://google.serper.dev/search", {
+    method: "POST",
+    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ q: keyword, num: 20, gl: "us", hl: "en" }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    const err = new Error(`Serper ${response.status}: ${body.slice(0, 150)}`);
+    (err as { httpStatus?: number }).httpStatus = response.status;
+    throw err;
+  }
+  const json = (await response.json()) as {
+    organic?: { position?: number; link?: string; title?: string }[];
+  };
+  return toSerpDomains(json.organic ?? []);
 }

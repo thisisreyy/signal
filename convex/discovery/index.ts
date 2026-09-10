@@ -10,14 +10,19 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import {
   backoffMs,
+  CIRCUIT_BREAK_FAILURES,
   IMPLEMENTED_FRONTIER,
   KEYWORD_KINDS,
   MAX_ATTEMPTS,
+  MAX_CANDIDATES_TO_VALIDATE,
   MAX_FETCH_CALLS,
   MAX_LLM_CALLS,
+  MAX_SEARCH_CALLS,
   nextStepKind,
+  nextValidationBatch,
   STEP_STALE_MS,
   stepKey,
+  VERDICTS,
   type BusinessProfileFields,
   type DiscoveryState,
   type StepKind,
@@ -144,8 +149,29 @@ export const claimStep = internalMutation({
     const run = await ctx.db.get(step.discoveryId);
     if (!run || run.state === "FAILED" || run.state === "COMPLETE") return null;
 
+    // The provider looks dead: stop before grinding every remaining step
+    // through its full retry budget.
+    if ((run.consecutiveFailures ?? 0) >= CIRCUIT_BREAK_FAILURES) {
+      await ctx.db.patch(step._id, {
+        status: "failed",
+        errorClass: "terminal",
+        error: "circuit opened after repeated provider failures",
+      });
+      await ctx.db.patch(run._id, {
+        state: "FAILED",
+        stateBeforeFailure: run.state as Exclude<DiscoveryState, "COMPLETE" | "FAILED">,
+        error: "circuit opened after repeated provider failures",
+        updatedAt: Date.now(),
+      });
+      return null;
+    }
+
     // Cost caps, enforced transactionally before any spend.
-    if (run.fetchCalls > MAX_FETCH_CALLS || run.llmCalls > MAX_LLM_CALLS) {
+    if (
+      run.fetchCalls > MAX_FETCH_CALLS ||
+      run.llmCalls > MAX_LLM_CALLS ||
+      run.searchCalls > MAX_SEARCH_CALLS
+    ) {
       await ctx.db.patch(step._id, {
         status: "failed",
         errorClass: "terminal",
@@ -206,12 +232,36 @@ export const recordExternalCall = internalMutation({
 });
 
 export const getExternalCall = internalQuery({
-  args: { callKey: v.string() },
+  args: {
+    callKey: v.string(),
+    // Searches are reusable across runs but go stale; pass a window to treat
+    // an old entry as absent. Omitted = any age (page fetches, LLM calls,
+    // which are keyed to one run and never worth repeating).
+    maxAgeMs: v.optional(v.number()),
+    now: v.optional(v.number()), // caller-supplied: queries must not read the clock
+  },
   handler: async (ctx, args) => {
-    return await ctx.db
+    const entry = await ctx.db
       .query("externalCalls")
       .withIndex("by_callKey", (q) => q.eq("callKey", args.callKey))
       .unique();
+    if (!entry) return null;
+    if (args.maxAgeMs !== undefined && args.now !== undefined) {
+      if (entry.createdAt < args.now - args.maxAgeMs) return null; // stale
+    }
+    return entry;
+  },
+});
+
+/** The next batch of still-unvalidated candidates, planned from data. */
+export const getValidationBatch = internalQuery({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const candidates = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(MAX_CANDIDATES_TO_VALIDATE);
+    return nextValidationBatch(candidates).map((c) => c.keyword);
   },
 });
 
@@ -241,6 +291,7 @@ export const completeFetchStep = internalMutation({
     });
     const run = await ctx.db.get(step.discoveryId);
     if (!run) return;
+    await ctx.db.patch(run._id, { consecutiveFailures: 0 });
     await insertStepAndSchedule(ctx, run._id, "PROFILE", run.url);
   },
 });
@@ -278,7 +329,11 @@ export const completeProfileStep = internalMutation({
       createdAt: Date.now(),
     });
     await ctx.db.patch(step._id, { status: "done", doneAt: Date.now() });
-    await ctx.db.patch(run._id, { state: "GENERATING_KEYWORDS", updatedAt: Date.now() });
+    await ctx.db.patch(run._id, {
+      state: "GENERATING_KEYWORDS",
+      consecutiveFailures: 0,
+      updatedAt: Date.now(),
+    });
     await insertStepAndSchedule(ctx, run._id, "GENERATE_KEYWORDS", run.url);
   },
 });
@@ -329,9 +384,106 @@ export const completeKeywordsStep = internalMutation({
       doneAt: now,
       result: { generated: args.keywords.length },
     });
-    // VALIDATING is the implemented frontier: the run parks here awaiting
-    // Phase 3 rather than pretending to be COMPLETE.
-    await ctx.db.patch(run._id, { state: "VALIDATING", updatedAt: now });
+    await ctx.db.patch(run._id, {
+      state: "VALIDATING",
+      consecutiveFailures: 0,
+      updatedAt: now,
+    });
+    await ensureValidationStep(ctx, run._id);
+  },
+});
+
+/**
+ * Plan the next validation batch from the candidates themselves. The cursor
+ * is the data ("which candidates are still unvalidated"), not a counter, so a
+ * resumed or healed run can never re-validate a keyword or skip one.
+ * When nothing is left, the phase is finished and the state advances.
+ */
+async function ensureValidationStep(ctx: MutationCtx, discoveryId: Id<"discoveryRuns">) {
+  const run = await ctx.db.get(discoveryId);
+  if (!run || run.state !== "VALIDATING") return;
+
+  const candidates = await ctx.db
+    .query("keywordCandidates")
+    .withIndex("by_discoveryId", (q) => q.eq("discoveryId", discoveryId))
+    .take(MAX_CANDIDATES_TO_VALIDATE);
+  const batch = nextValidationBatch(candidates);
+
+  if (batch.length === 0) {
+    // EXTRACTING_COMPETITORS is the implemented frontier: park here awaiting
+    // Phase 4 rather than pretending to be COMPLETE.
+    await ctx.db.patch(discoveryId, {
+      state: "EXTRACTING_COMPETITORS",
+      updatedAt: Date.now(),
+    });
+    return;
+  }
+  // Batch identity = its contents, so the derived stepKey is stable across
+  // retries of the same batch and distinct between different batches.
+  const input = batch.map((c) => c.keyword).join("|");
+  await insertStepAndSchedule(ctx, discoveryId, "VALIDATE_BATCH", input);
+}
+
+/**
+ * One batch validated → write each verdict with the evidence that produced
+ * it, then plan the next batch. All one transaction, so the phase can never
+ * stall between "batch finished" and "next batch exists".
+ */
+export const completeValidationBatch = internalMutation({
+  args: {
+    stepId: v.id("discoverySteps"),
+    results: v.array(
+      v.object({
+        keyword: v.string(),
+        status: v.union(...VERDICTS.map((s) => v.literal(s)), v.literal("error")),
+        reasoning: v.string(),
+        confidence: v.optional(v.number()),
+        error: v.optional(v.string()),
+        topDomains: v.array(
+          v.object({
+            position: v.number(),
+            domain: v.string(),
+            title: v.optional(v.string()),
+          }),
+        ),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step || step.status !== "running") return;
+    const run = await ctx.db.get(step.discoveryId);
+    if (!run) return;
+
+    const candidates = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", run._id))
+      .take(MAX_CANDIDATES_TO_VALIDATE);
+    const byKeyword = new Map(candidates.map((c) => [c.keyword, c]));
+
+    const now = Date.now();
+    for (const result of args.results) {
+      const candidate = byKeyword.get(result.keyword);
+      if (!candidate) continue;
+      await ctx.db.patch(candidate._id, {
+        status: result.status,
+        validation: {
+          reasoning: result.reasoning,
+          confidence: result.confidence,
+          checkedAt: now,
+          topDomains: result.topDomains,
+          error: result.error,
+        },
+      });
+    }
+
+    await ctx.db.patch(step._id, {
+      status: "done",
+      doneAt: now,
+      result: { validated: args.results.length },
+    });
+    await ctx.db.patch(run._id, { consecutiveFailures: 0, updatedAt: now });
+    await ensureValidationStep(ctx, run._id);
   },
 });
 
@@ -348,6 +500,13 @@ export const failStep = internalMutation({
     const step = await ctx.db.get(args.stepId);
     if (!step || step.status !== "running") return;
     const exhausted = step.attempts >= MAX_ATTEMPTS;
+
+    const runForCount = await ctx.db.get(step.discoveryId);
+    if (runForCount) {
+      await ctx.db.patch(runForCount._id, {
+        consecutiveFailures: (runForCount.consecutiveFailures ?? 0) + 1,
+      });
+    }
 
     if (args.errorClass === "retryable" && !exhausted) {
       await ctx.db.patch(step._id, {
@@ -397,6 +556,35 @@ export const resume = mutation({
     const active = steps.find((s) => s.status === "pending" || s.status === "running");
     if (active) {
       return { resumed: false, reason: `${active.kind} is already ${active.status}` };
+    }
+
+    // VALIDATING plans from candidate statuses rather than a step sequence.
+    if (state === "VALIDATING") {
+      if (run.state === "FAILED") {
+        await ctx.db.patch(run._id, {
+          state,
+          error: undefined,
+          stateBeforeFailure: undefined,
+          consecutiveFailures: 0,
+          updatedAt: Date.now(),
+        });
+      }
+      const failedBatch = steps.find((s) => s.kind === "VALIDATE_BATCH" && s.status === "failed");
+      if (failedBatch) {
+        await ctx.db.patch(failedBatch._id, {
+          status: "pending",
+          attempts: 0,
+          error: undefined,
+          errorClass: undefined,
+          nextAttemptAt: undefined,
+        });
+        await ctx.scheduler.runAfter(0, internal.discovery.actions.runStep, {
+          stepId: failedBatch._id,
+        });
+      } else {
+        await ensureValidationStep(ctx, run._id);
+      }
+      return { resumed: true, kind: "VALIDATE_BATCH" as const };
     }
 
     const doneKinds = steps.filter((s) => s.status === "done").map((s) => s.kind);
@@ -492,6 +680,22 @@ export const sweep = internalMutation({
     // Parked runs: a live state whose next step simply doesn't exist. This is
     // how a run picks up when a later pipeline phase is deployed, and the
     // backstop if an intent were ever lost.
+    // A VALIDATING run with no live step simply needs its next batch planned.
+    const validating = await ctx.db
+      .query("discoveryRuns")
+      .withIndex("by_state", (q) => q.eq("state", "VALIDATING"))
+      .take(50);
+    for (const run of validating) {
+      if (run.updatedAt > now - 60_000) continue;
+      const steps = await ctx.db
+        .query("discoverySteps")
+        .withIndex("by_discovery", (q) => q.eq("discoveryId", run._id))
+        .take(STEP_SCAN_LIMIT);
+      if (steps.some((s) => s.status === "pending" || s.status === "running")) continue;
+      if (steps.some((s) => s.kind === "VALIDATE_BATCH" && s.status === "failed")) continue;
+      await ensureValidationStep(ctx, run._id);
+    }
+
     for (const state of ["PROFILING", "GENERATING_KEYWORDS"] as const) {
       const runs = await ctx.db
         .query("discoveryRuns")

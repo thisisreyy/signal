@@ -271,3 +271,136 @@ describe("keyword prompt", () => {
     expect(keywordsPrompt("https://revnu.com", profile)).toContain("own brand name");
   });
 });
+
+// ---------- Phase 3 ----------
+
+import {
+  domainOf,
+  nextValidationBatch,
+  toSerpDomains,
+  validateVerdicts,
+  VALIDATION_BATCH_SIZE,
+  verdictsPrompt,
+} from "../../convex/discovery/logic";
+
+describe("validation batch planning", () => {
+  const candidates = [
+    { keyword: "a", status: "relevant" },
+    { keyword: "b", status: "unvalidated" },
+    { keyword: "c", status: "error" },
+    { keyword: "d", status: "unvalidated" },
+    { keyword: "e", status: "unvalidated" },
+    { keyword: "f", status: "unvalidated" },
+    { keyword: "g", status: "unvalidated" },
+  ];
+
+  test("takes only unvalidated candidates, up to the batch size", () => {
+    const batch = nextValidationBatch(candidates);
+    expect(batch).toHaveLength(VALIDATION_BATCH_SIZE);
+    expect(batch.every((c) => c.status === "unvalidated")).toBe(true);
+    expect(batch.map((c) => c.keyword)).toEqual(["b", "d", "e", "f"]);
+  });
+
+  test("never re-validates a keyword that already has a verdict", () => {
+    const batch = nextValidationBatch(candidates);
+    expect(batch.map((c) => c.keyword)).not.toContain("a");
+    expect(batch.map((c) => c.keyword)).not.toContain("c");
+  });
+
+  test("empty when everything is judged — that is how the phase ends", () => {
+    const done = candidates.map((c) => ({ ...c, status: "relevant" }));
+    expect(nextValidationBatch(done)).toHaveLength(0);
+  });
+
+  test("progress is derived from data, so a resumed run picks up exactly where it stopped", () => {
+    const first = nextValidationBatch(candidates);
+    const after = candidates.map((c) =>
+      first.some((f) => f.keyword === c.keyword) ? { ...c, status: "relevant" } : c,
+    );
+    const second = nextValidationBatch(after);
+    expect(second.map((c) => c.keyword)).toEqual(["g"]);
+  });
+});
+
+describe("SERP evidence extraction", () => {
+  test("domainOf strips protocol, www and path", () => {
+    expect(domainOf("https://www.clay.com/claygent")).toBe("clay.com");
+    expect(domainOf("https://docs.saasquatch.com/x")).toBe("docs.saasquatch.com");
+  });
+
+  test("keeps position, domain and a trimmed title", () => {
+    const domains = toSerpDomains([
+      { position: 1, link: "https://www.artisan.co/ai-sales-agent", title: "Ava" },
+      { link: "https://lindy.ai/", title: "Lindy" },
+    ]);
+    expect(domains[0]).toEqual({ position: 1, domain: "artisan.co", title: "Ava" });
+    expect(domains[1]!.position).toBe(2); // falls back to index order
+  });
+
+  test("drops malformed results rather than throwing", () => {
+    expect(toSerpDomains([{ position: 1 }, { position: 2, link: "https://ok.com" }])).toHaveLength(1);
+  });
+});
+
+describe("verdict parsing", () => {
+  const good = {
+    verdicts: [
+      { keyword: "ai bdr", verdict: "relevant", reasoning: "competitors rank here", confidence: 0.9 },
+      { keyword: "AI SDR", verdict: "ambiguous", reasoning: "mixed", confidence: 0.5 },
+    ],
+  };
+
+  test("accepts well-formed verdicts and normalizes the keyword", () => {
+    const result = validateVerdicts(good);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.verdicts[1]!.keyword).toBe("ai sdr"); // normalized for matching
+    }
+  });
+
+  test("skips individual malformed entries but keeps the usable ones", () => {
+    const mixed = { verdicts: [...good.verdicts, { keyword: "x", verdict: "maybe" }, null] };
+    const result = validateVerdicts(mixed);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.verdicts).toHaveLength(2);
+  });
+
+  test("defaults an out-of-range confidence rather than failing the batch", () => {
+    const odd = { verdicts: [{ ...good.verdicts[0], confidence: 42 }] };
+    const result = validateVerdicts(odd);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.verdicts[0]!.confidence).toBe(0.5);
+  });
+
+  test("rejects an entirely unusable payload so the corrective retry fires", () => {
+    expect(validateVerdicts({ verdicts: [] }).ok).toBe(false);
+    expect(validateVerdicts({ verdicts: "relevant" }).ok).toBe(false);
+    expect(validateVerdicts("all of them are fine").ok).toBe(false);
+  });
+});
+
+describe("verdict prompt", () => {
+  const profile = {
+    name: "Revnu",
+    whatTheySell: "AI growth automation",
+    audience: "b2b" as const,
+    buyerType: "founders",
+    pricePoint: null,
+    businessStage: null,
+    category: "growth automation platform",
+  };
+
+  test("shows the ranking domains as the evidence to judge on", () => {
+    const prompt = verdictsPrompt(profile, [
+      { keyword: "ai bdr", domains: [{ position: 1, domain: "artisan.co", title: "Ava" }] },
+    ]);
+    expect(prompt).toContain("artisan.co");
+    expect(prompt).toContain("RANKS ON PAGE ONE");
+    expect(prompt).toContain("Judge only from the ranking domains");
+  });
+
+  test("handles a keyword with no organic results without breaking", () => {
+    const prompt = verdictsPrompt(profile, [{ keyword: "nothing", domains: [] }]);
+    expect(prompt).toContain("no organic results");
+  });
+});

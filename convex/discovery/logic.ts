@@ -21,9 +21,14 @@ export type DiscoveryState = (typeof DISCOVERY_STATES)[number];
  * "awaiting the next phase of the build", not stuck — the sweep leaves it
  * alone and the UI can say so honestly.
  */
-export const IMPLEMENTED_FRONTIER: DiscoveryState = "VALIDATING";
+export const IMPLEMENTED_FRONTIER: DiscoveryState = "EXTRACTING_COMPETITORS";
 
-export const STEP_KINDS = ["FETCH_PAGES", "PROFILE", "GENERATE_KEYWORDS"] as const;
+export const STEP_KINDS = [
+  "FETCH_PAGES",
+  "PROFILE",
+  "GENERATE_KEYWORDS",
+  "VALIDATE_BATCH",
+] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
 /**
@@ -35,7 +40,7 @@ export type StepKind = (typeof STEP_KINDS)[number];
 export const STEPS_FOR_STATE: Record<DiscoveryState, readonly StepKind[]> = {
   PROFILING: ["FETCH_PAGES", "PROFILE"],
   GENERATING_KEYWORDS: ["GENERATE_KEYWORDS"],
-  VALIDATING: [], // Phase 3
+  VALIDATING: [], // data-driven: see nextValidationBatch / ensureValidationStep
   EXTRACTING_COMPETITORS: [], // Phase 4
   RECOMMENDING: [], // Phase 5
   COMPLETE: [],
@@ -114,7 +119,14 @@ export const STEP_STALE_MS = 3 * 60_000;
 // ---------- Cost caps (per discovery run) ----------
 
 export const MAX_FETCH_CALLS = 8;
-export const MAX_LLM_CALLS = 6;
+/** Phase 3 classifies a whole batch per call, so 23 keywords cost ~6 calls. */
+export const MAX_LLM_CALLS = 30;
+/** Hard per-run ceiling on paid searches — the cap the requirements demand. */
+export const MAX_SEARCH_CALLS = 40;
+/** Never validate an unbounded candidate list, whatever the model proposed. */
+export const MAX_CANDIDATES_TO_VALIDATE = 30;
+/** Consecutive step failures before we stop calling a provider entirely. */
+export const CIRCUIT_BREAK_FAILURES = 8;
 
 // ---------- Page fetching plan ----------
 
@@ -409,4 +421,177 @@ Rules:
 - For comparison queries, only name companies you are reasonably confident actually exist in this market.
 - Keep each query 2-8 words, lowercase.
 - These are hypotheses. Real search results will test them next, so breadth matters more than certainty.`;
+}
+
+// ---------- Phase 3: keyword validation against real search results ----------
+
+/**
+ * Keywords are validated in small sequential batches rather than fanned out
+ * one step per keyword. Three failures are avoided by that single choice:
+ * the provider's 5 queries/second ceiling is never breached, the run
+ * document never becomes a write-contention hotspot under concurrent
+ * actions, and classification costs one LLM call per batch instead of one
+ * per keyword (which would blow the per-run cost cap outright).
+ */
+export const VALIDATION_BATCH_SIZE = 4;
+/** Spacing between searches inside a batch; keeps us under 5 queries/sec. */
+export const SEARCH_PACING_MS = 250;
+/** Ledger entries older than this are re-searched; fresher ones are reused. */
+export const SEARCH_CACHE_MS = 24 * 60 * 60 * 1000;
+/** Results kept as evidence on each candidate (the ledger holds the rest). */
+export const EVIDENCE_DOMAINS = 10;
+
+export type Verdict = "relevant" | "irrelevant" | "ambiguous";
+export const VERDICTS = ["relevant", "irrelevant", "ambiguous"] as const;
+
+export interface SerpDomain {
+  position: number;
+  domain: string;
+  title?: string;
+}
+
+export interface KeywordVerdict {
+  keyword: string;
+  verdict: Verdict;
+  reasoning: string;
+  confidence: number;
+}
+
+/** Which candidates the next batch should cover. Source of truth is the
+ *  candidates' own statuses, so a resumed run never re-validates or skips. */
+export function nextValidationBatch<T extends { keyword: string; status: string }>(
+  candidates: readonly T[],
+  batchSize: number = VALIDATION_BATCH_SIZE,
+): T[] {
+  return candidates
+    .filter((c) => c.status === "unvalidated")
+    .slice(0, Math.max(1, batchSize));
+}
+
+/** Domain of a result URL, normalized for comparison. */
+export function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return url.toLowerCase();
+  }
+}
+
+/** Serper's organic array → the trimmed evidence we store and classify on. */
+export function toSerpDomains(
+  organic: readonly { position?: number; link?: string; title?: string }[],
+): SerpDomain[] {
+  return organic
+    .filter((o): o is { position?: number; link: string; title?: string } =>
+      typeof o.link === "string",
+    )
+    .map((o, i) => ({
+      position: o.position ?? i + 1,
+      domain: domainOf(o.link),
+      title: o.title?.slice(0, 120),
+    }))
+    .slice(0, EVIDENCE_DOMAINS);
+}
+
+export const VERDICTS_TOOL_SCHEMA = {
+  name: "emit_keyword_verdicts",
+  description:
+    "Judge whether each search query is one that buyers of this business's product would type, using the domains that actually rank on page one as the evidence.",
+  input_schema: {
+    type: "object",
+    properties: {
+      verdicts: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            keyword: { type: "string", description: "Echo the query exactly as given" },
+            verdict: { type: "string", enum: [...VERDICTS] },
+            reasoning: {
+              type: "string",
+              description: "One sentence citing what the ranking domains show",
+            },
+            confidence: { type: "number", description: "0..1" },
+          },
+          required: ["keyword", "verdict", "reasoning", "confidence"],
+        },
+      },
+    },
+    required: ["verdicts"],
+  },
+} as const;
+
+/**
+ * Parse the classifier's payload. Deliberately forgiving: a batch must always
+ * make forward progress, so an unusable payload is rejected (one corrective
+ * retry) but a payload merely missing some keywords is accepted — the caller
+ * marks the uncovered ones as errored rather than looping on them forever.
+ */
+export function validateVerdicts(
+  raw: unknown,
+): { ok: true; verdicts: KeywordVerdict[] } | { ok: false; reason: string } {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, reason: "payload is not an object" };
+  }
+  const list = (raw as Record<string, unknown>).verdicts;
+  if (!Array.isArray(list)) return { ok: false, reason: "verdicts must be an array" };
+  if (list.length === 0) return { ok: false, reason: "verdicts array is empty" };
+
+  const verdicts: KeywordVerdict[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.keyword !== "string") continue;
+    if (!VERDICTS.includes(o.verdict as Verdict)) continue;
+    const confidence =
+      typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1
+        ? o.confidence
+        : 0.5;
+    verdicts.push({
+      keyword: normalizeKeyword(o.keyword),
+      verdict: o.verdict as Verdict,
+      reasoning:
+        typeof o.reasoning === "string" ? o.reasoning.trim().slice(0, 400) : "(no reasoning given)",
+      confidence,
+    });
+  }
+  if (verdicts.length === 0) {
+    return { ok: false, reason: "no well-formed verdicts in the payload" };
+  }
+  return { ok: true, verdicts };
+}
+
+export function verdictsPrompt(
+  profile: StoredProfile,
+  searched: readonly { keyword: string; domains: readonly SerpDomain[] }[],
+): string {
+  const field = (label: string, value: string | null) =>
+    `${label}: ${value ?? "(unknown)"}`;
+
+  const blocks = searched
+    .map(({ keyword, domains }) => {
+      const listing = domains.length
+        ? domains.map((d) => `  ${d.position}. ${d.domain}${d.title ? ` — ${d.title}` : ""}`).join("\n")
+        : "  (no organic results returned)";
+      return `QUERY: "${keyword}"\nRANKS ON PAGE ONE:\n${listing}`;
+    })
+    .join("\n\n");
+
+  return `Judge each search query below for this business.
+
+BUSINESS
+${field("Name", profile.name)}
+${field("Category", profile.category)}
+${field("What they sell", profile.whatTheySell)}
+${field("Audience", profile.audience)}
+${field("Buyer", profile.buyerType)}
+
+${blocks}
+
+For each query, decide:
+- "relevant": page one is dominated by companies selling something comparable to this business. Someone searching this is plausibly in the market for what this business offers.
+- "irrelevant": page one is a different industry, or a different intent entirely — definitions, news, jobs, forums, or a specific company someone was already looking for.
+- "ambiguous": genuinely mixed — some comparable companies alongside significant off-target results.
+
+Judge only from the ranking domains shown. They are the evidence; the query's wording is not. Echo each keyword exactly as given, and give one sentence of reasoning that cites what the domains show.`;
 }

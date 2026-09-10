@@ -115,6 +115,10 @@ export default defineSchema({
     fetchCalls: v.number(),
     llmCalls: v.number(),
     searchCalls: v.number(),
+    // Consecutive step failures; resets on any completion. Opens the circuit
+    // so a dead provider stops the run early instead of grinding every
+    // remaining step through its full retry budget.
+    consecutiveFailures: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -195,6 +199,28 @@ export default defineSchema({
       v.literal("relevant"),
       v.literal("irrelevant"),
       v.literal("ambiguous"),
+      // A keyword whose search or classification could not complete. Kept
+      // distinct from "irrelevant": we failed to judge it, we did not judge
+      // it unsuitable.
+      v.literal("error"),
+    ),
+    // The verdict AND what produced it. A classification with no visible
+    // evidence is exactly what this pipeline is supposed to never ship.
+    validation: v.optional(
+      v.object({
+        reasoning: v.string(),
+        confidence: v.optional(v.number()),
+        checkedAt: v.number(),
+        // Trimmed page-one evidence; the full response stays in externalCalls.
+        topDomains: v.array(
+          v.object({
+            position: v.number(),
+            domain: v.string(),
+            title: v.optional(v.string()),
+          }),
+        ),
+        error: v.optional(v.string()),
+      }),
     ),
     createdAt: v.number(),
   })
