@@ -18,6 +18,8 @@ import {
   MAX_FETCH_CALLS,
   MAX_LLM_CALLS,
   MAX_SEARCH_CALLS,
+  DEFAULT_TOP_COMPETITORS,
+  DOMAIN_CLASSES,
   nextStepKind,
   nextValidationBatch,
   STEP_STALE_MS,
@@ -67,6 +69,7 @@ const STEP_SCAN_LIMIT = 200;
 export const start = mutation({
   args: {
     url: v.string(),
+    topCompetitors: v.optional(v.number()),
     injectCrash: v.optional(
       v.object({
         step: v.string(),
@@ -92,6 +95,7 @@ export const start = mutation({
       url,
       state: "PROFILING",
       injectCrash: args.injectCrash,
+      topCompetitors: args.topCompetitors ?? DEFAULT_TOP_COMPETITORS,
       fetchCalls: 0,
       llmCalls: 0,
       searchCalls: 0,
@@ -262,6 +266,29 @@ export const getValidationBatch = internalQuery({
       .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
       .take(MAX_CANDIDATES_TO_VALIDATE);
     return nextValidationBatch(candidates).map((c) => c.keyword);
+  },
+});
+
+/**
+ * The page-one evidence Phase 3 already stored, for the keywords real search
+ * data confirmed as relevant. Phase 4 needs no new searches because of this.
+ */
+export const getValidatedEvidence = internalQuery({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const relevant = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId_and_status", (q) =>
+        q.eq("discoveryId", args.discoveryId).eq("status", "relevant"),
+      )
+      .take(MAX_CANDIDATES_TO_VALIDATE);
+    return relevant.map((c) => ({
+      keyword: c.keyword,
+      topDomains: (c.validation?.topDomains ?? []).map((d) => ({
+        domain: d.domain,
+        position: d.position,
+      })),
+    }));
   },
 });
 
@@ -489,6 +516,120 @@ export const completeValidationBatch = internalMutation({
 
 const MAX_CANDIDATES = 100;
 
+/**
+ * Competitors extracted → store every domain with its classification, the
+ * mechanism that decided it, and the evidence that identified it. Advances
+ * to RECOMMENDING (the implemented frontier) in the same transaction.
+ */
+export const completeCompetitorsStep = internalMutation({
+  args: {
+    stepId: v.id("discoverySteps"),
+    domains: v.array(
+      v.object({
+        domain: v.string(),
+        classification: v.union(...DOMAIN_CLASSES.map((c) => v.literal(c)), v.literal("social"), v.literal("marketplace")),
+        decidedBy: v.union(v.literal("list"), v.literal("llm")),
+        reasoning: v.string(),
+        confidence: v.optional(v.number()),
+        appearances: v.number(),
+        averagePosition: v.number(),
+        bestPosition: v.number(),
+        score: v.number(),
+        evidence: v.array(v.object({ keyword: v.string(), position: v.number() })),
+        rank: v.optional(v.number()),
+        selected: v.boolean(),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step || step.status !== "running") return;
+    const run = await ctx.db.get(step.discoveryId);
+    if (!run) return;
+
+    // A healed retry rewrites rather than duplicates.
+    const existing = await ctx.db
+      .query("competitors")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", run._id))
+      .take(200);
+    for (const row of existing) await ctx.db.delete(row._id);
+
+    const now = Date.now();
+    for (const d of args.domains) {
+      await ctx.db.insert("competitors", { discoveryId: run._id, ...d, createdAt: now });
+    }
+    await ctx.db.patch(step._id, {
+      status: "done",
+      doneAt: now,
+      result: {
+        classified: args.domains.length,
+        competitors: args.domains.filter((d) => d.classification === "competitor").length,
+      },
+    });
+    await ctx.db.patch(run._id, {
+      state: "RECOMMENDING",
+      consecutiveFailures: 0,
+      updatedAt: now,
+    });
+  },
+});
+
+/**
+ * The human-gated bridge from discovery into the live daily tracker. Nothing
+ * writes to the tracker's config automatically: discovery PROPOSES, a person
+ * (or the Phase 7 UI) decides. Keeps "never track what a human hasn't seen".
+ */
+export const applyToTracking = mutation({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const run = await ctx.db.get(args.discoveryId);
+    if (!run) throw new Error("discovery run not found");
+    const profile = await ctx.db
+      .query("businessProfiles")
+      .withIndex("by_discovery", (q) => q.eq("discoveryId", args.discoveryId))
+      .unique();
+    if (!profile) throw new Error("this discovery has no profile yet");
+
+    const relevant = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId_and_status", (q) =>
+        q.eq("discoveryId", args.discoveryId).eq("status", "relevant"),
+      )
+      .take(MAX_CANDIDATES_TO_VALIDATE);
+    const selected = await ctx.db
+      .query("competitors")
+      .withIndex("by_discoveryId_and_selected", (q) =>
+        q.eq("discoveryId", args.discoveryId).eq("selected", true),
+      )
+      .take(50);
+    if (relevant.length === 0) {
+      throw new Error("no validated keywords to track yet");
+    }
+
+    const business = {
+      name: profile.name ?? new URL(run.url).hostname,
+      domain: new URL(run.url).hostname.replace(/^www\./, ""),
+    };
+    const config = await ctx.db
+      .query("config")
+      .withIndex("by_key", (q) => q.eq("key", "singleton"))
+      .unique();
+    const patch = {
+      business,
+      keywords: relevant.map((c) => c.keyword),
+      competitors: selected.map((c) => c.domain),
+    };
+    if (config) await ctx.db.patch(config._id, patch);
+    else await ctx.db.insert("config", { key: "singleton", ...patch });
+
+    return {
+      business,
+      keywords: patch.keywords.length,
+      competitors: patch.competitors.length,
+    };
+  },
+});
+
 /** Failure path: retryable → backoff + re-pend; terminal → run FAILED. */
 export const failStep = internalMutation({
   args: {
@@ -696,7 +837,7 @@ export const sweep = internalMutation({
       await ensureValidationStep(ctx, run._id);
     }
 
-    for (const state of ["PROFILING", "GENERATING_KEYWORDS"] as const) {
+    for (const state of ["PROFILING", "GENERATING_KEYWORDS", "EXTRACTING_COMPETITORS"] as const) {
       const runs = await ctx.db
         .query("discoveryRuns")
         .withIndex("by_state", (q) => q.eq("state", state))
@@ -734,7 +875,18 @@ export const getRun = query({
       .query("keywordCandidates")
       .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
       .take(MAX_CANDIDATES);
-    return { run, steps, profile, candidates, implementedFrontier: IMPLEMENTED_FRONTIER };
+    const competitors = await ctx.db
+      .query("competitors")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(200);
+    return {
+      run,
+      steps,
+      profile,
+      candidates,
+      competitors: competitors.sort((a, b) => b.score - a.score),
+      implementedFrontier: IMPLEMENTED_FRONTIER,
+    };
   },
 });
 

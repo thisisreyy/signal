@@ -13,11 +13,19 @@ import {
   pagesToFetch,
   PROFILE_TOOL_SCHEMA,
   profilePrompt,
+  aggregateDomains,
+  COMPETITORS_TOOL_SCHEMA,
+  competitorsPrompt,
+  DEFAULT_TOP_COMPETITORS,
+  excludedCategory,
+  MAX_DOMAINS_TO_CLASSIFY,
+  rankCompetitors,
   SEARCH_CACHE_MS,
   SEARCH_PACING_MS,
   toSerpDomains,
   validateKeywords,
   validateProfile,
+  validateClassifications,
   validateVerdicts,
   VERDICTS_TOOL_SCHEMA,
   verdictsPrompt,
@@ -52,6 +60,8 @@ export const runStep = internalAction({
         await doGenerateKeywords(ctx, run, step);
       } else if (step.kind === "VALIDATE_BATCH") {
         await doValidateBatch(ctx, run, step);
+      } else if (step.kind === "EXTRACT_COMPETITORS") {
+        await doExtractCompetitors(ctx, run, step);
       } else {
         throw new Error(`unknown step kind ${step.kind}`);
       }
@@ -463,4 +473,136 @@ async function serperSearch(keyword: string, apiKey: string): Promise<SerpDomain
     organic?: { position?: number; link?: string; title?: string }[];
   };
   return toSerpDomains(json.organic ?? []);
+}
+
+// ---------- EXTRACT_COMPETITORS ----------
+
+/** Exactly the shape completeCompetitorsStep stores. */
+interface StoredCompetitor {
+  domain: string;
+  classification:
+    | "competitor" | "adjacent" | "directory" | "forum"
+    | "media" | "reference" | "social" | "marketplace" | "other";
+  decidedBy: "list" | "llm";
+  reasoning: string;
+  confidence?: number;
+  appearances: number;
+  averagePosition: number;
+  bestPosition: number;
+  score: number;
+  evidence: { keyword: string; position: number }[];
+  rank?: number;
+  selected: boolean;
+}
+
+/**
+ * Turn the validated keywords' page-one results into a ranked competitor set.
+ *
+ * Costs ZERO searches: Phase 3 already stored each keyword's ranking domains
+ * as the evidence behind its verdict, so this phase is pure aggregation plus
+ * a single classification call.
+ *
+ * Two-stage filtering by design. A hardcoded list removes the domains that
+ * are never competition (Reddit, G2, Wikipedia) — unambiguous, free, and more
+ * reliable than asking a model. Only the remainder, where the answer genuinely
+ * depends on what the company sells, costs an LLM call.
+ */
+async function doExtractCompetitors(
+  ctx: ActionCtx,
+  run: Doc<"discoveryRuns">,
+  step: Doc<"discoverySteps">,
+) {
+  const profile = await ctx.runQuery(internal.discovery.index.getProfileForRun, {
+    discoveryId: run._id,
+  });
+  if (!profile) throw terminal("no business profile exists for this run");
+
+  const validated = await ctx.runQuery(internal.discovery.index.getValidatedEvidence, {
+    discoveryId: run._id,
+  });
+  if (validated.length === 0) {
+    throw terminal("no validated keywords produced any ranking evidence");
+  }
+
+  const businessDomain = new URL(run.url).hostname;
+  const all = aggregateDomains(validated, businessDomain);
+
+  // Stage 1: the hardcoded list.
+  const excluded: StoredCompetitor[] = [];
+  const needsClassifying: typeof all = [];
+  for (const stats of all) {
+    const category = excludedCategory(stats.domain);
+    if (category) {
+      excluded.push({
+        ...stats,
+        classification: category as StoredCompetitor["classification"],
+        decidedBy: "list",
+        reasoning: `Known ${category} domain, excluded before classification.`,
+        selected: false,
+      });
+    } else {
+      needsClassifying.push(stats);
+    }
+  }
+
+  // Stage 2: the model, on the remainder only, in one call.
+  const shortlist = needsClassifying.slice(0, MAX_DOMAINS_TO_CLASSIFY);
+  const prompt = competitorsPrompt(profile, shortlist);
+
+  maybeInjectCrash(run, step, "before-ledger");
+  let parsed = validateClassifications(
+    await llmToolCall(ctx, run, {
+      keyContent: `${run._id}:competitors:${contentHash(prompt)}`,
+      prompt,
+      tool: COMPETITORS_TOOL_SCHEMA,
+      maxTokens: 3000,
+    }),
+  );
+  maybeInjectCrash(run, step, "after-ledger");
+
+  if (!parsed.ok) {
+    const fixPrompt = `${prompt}\n\nYour previous output was rejected: ${parsed.reason}. Emit the classifications again, following the schema exactly.`;
+    parsed = validateClassifications(
+      await llmToolCall(ctx, run, {
+        keyContent: `${run._id}:competitors-fix:${contentHash(fixPrompt)}`,
+        prompt: fixPrompt,
+        tool: COMPETITORS_TOOL_SCHEMA,
+        maxTokens: 3000,
+      }),
+    );
+  }
+  if (!parsed.ok) {
+    throw terminal(`classifier produced malformed output twice: ${parsed.reason}`);
+  }
+
+  const byDomain = new Map(parsed.classifications.map((c) => [c.domain, c]));
+  const classified = shortlist.map((stats) => {
+    const verdict = byDomain.get(stats.domain);
+    return {
+      ...stats,
+      // Unclassified domains default to "other", never to "competitor":
+      // an unsupported competitor claim is exactly what must not ship.
+      classification: verdict?.classification ?? ("other" as const),
+      decidedBy: "llm" as const,
+      reasoning: verdict?.reasoning ?? "The classifier returned no verdict for this domain.",
+      confidence: verdict?.confidence,
+      selected: false,
+    };
+  });
+
+  const ranked = rankCompetitors(classified, run.topCompetitors ?? DEFAULT_TOP_COMPETITORS);
+  const rankedByDomain = new Map(ranked.map((r) => [r.domain, r]));
+
+  const toStore: StoredCompetitor[] = [
+    ...classified.map((c) => {
+      const r = rankedByDomain.get(c.domain);
+      return { ...c, rank: r?.rank, selected: r?.selected ?? false };
+    }),
+    ...excluded,
+  ];
+
+  await ctx.runMutation(internal.discovery.index.completeCompetitorsStep, {
+    stepId: step._id,
+    domains: toStore,
+  });
 }

@@ -404,3 +404,178 @@ describe("verdict prompt", () => {
     expect(prompt).toContain("no organic results");
   });
 });
+
+// ---------- Phase 4 ----------
+
+import {
+  aggregateDomains,
+  competitorsPrompt,
+  excludedCategory,
+  positionScore,
+  rankCompetitors,
+  registrableDomain,
+  validateClassifications,
+} from "../../convex/discovery/logic";
+
+describe("domain normalization", () => {
+  test("collapses subdomains to the company domain", () => {
+    expect(registrableDomain("docs.saasquatch.com")).toBe("saasquatch.com");
+    expect(registrableDomain("www.artisan.co")).toBe("artisan.co");
+    expect(registrableDomain("play.google.com")).toBe("google.com");
+  });
+
+  test("handles multi-part TLDs", () => {
+    expect(registrableDomain("shop.example.co.uk")).toBe("example.co.uk");
+    expect(registrableDomain("example.co.uk")).toBe("example.co.uk");
+  });
+
+  test("subdomain tricks cannot bypass the exclusion list", () => {
+    expect(excludedCategory("old.reddit.com")).toBe("forum");
+    expect(excludedCategory("apps.apple.com")).toBe("marketplace");
+    expect(excludedCategory("artisan.co")).toBeNull();
+  });
+});
+
+describe("competitor aggregation", () => {
+  const validated = [
+    {
+      keyword: "ai bdr",
+      topDomains: [
+        { domain: "artisan.co", position: 1 },
+        { domain: "reddit.com", position: 2 },
+        { domain: "lindy.ai", position: 5 },
+      ],
+    },
+    {
+      keyword: "ai sdr",
+      topDomains: [
+        { domain: "artisan.co", position: 3 },
+        { domain: "clay.com", position: 4 },
+      ],
+    },
+  ];
+
+  test("counts appearances and averages positions across keywords", () => {
+    const stats = aggregateDomains(validated);
+    const artisan = stats.find((s) => s.domain === "artisan.co")!;
+    expect(artisan.appearances).toBe(2);
+    expect(artisan.bestPosition).toBe(1);
+    expect(artisan.averagePosition).toBe(2);
+    expect(artisan.evidence).toHaveLength(2);
+  });
+
+  test("ranking often and ranking well both raise the score", () => {
+    const stats = aggregateDomains(validated);
+    const artisan = stats.find((s) => s.domain === "artisan.co")!;
+    const lindy = stats.find((s) => s.domain === "lindy.ai")!;
+    expect(artisan.score).toBeGreaterThan(lindy.score);
+    expect(stats[0]!.domain).toBe("artisan.co"); // sorted by score
+  });
+
+  test("the business is never its own competitor", () => {
+    const stats = aggregateDomains(validated, "https://artisan.co");
+    expect(stats.find((s) => s.domain === "artisan.co")).toBeUndefined();
+  });
+
+  test("a domain holding several slots on one page counts once for it", () => {
+    const stats = aggregateDomains([
+      {
+        keyword: "x",
+        topDomains: [
+          { domain: "artisan.co", position: 1 },
+          { domain: "artisan.co", position: 7 },
+        ],
+      },
+    ]);
+    const artisan = stats.find((s) => s.domain === "artisan.co")!;
+    expect(artisan.appearances).toBe(1);
+    expect(artisan.bestPosition).toBe(1); // keeps the best of the two
+  });
+
+  test("position score decays with rank and floors at zero", () => {
+    expect(positionScore(1)).toBe(1);
+    expect(positionScore(11)).toBeCloseTo(0.5, 5);
+    expect(positionScore(50)).toBe(0);
+  });
+});
+
+describe("competitor ranking and selection", () => {
+  const classified = [
+    { domain: "a.com", classification: "competitor" as const, score: 3 },
+    { domain: "b.com", classification: "competitor" as const, score: 9 },
+    { domain: "c.com", classification: "directory" as const, score: 20 },
+    { domain: "d.com", classification: "competitor" as const, score: 5 },
+  ];
+
+  test("only true competitors are ranked, best score first", () => {
+    const ranked = rankCompetitors(classified, 5);
+    expect(ranked.map((r) => r.domain)).toEqual(["b.com", "d.com", "a.com"]);
+    expect(ranked.every((r) => r.classification === "competitor")).toBe(true);
+  });
+
+  test("a high-scoring directory never becomes a tracked competitor", () => {
+    expect(rankCompetitors(classified, 5).find((r) => r.domain === "c.com")).toBeUndefined();
+  });
+
+  test("top N is configurable and marks only those as selected", () => {
+    const ranked = rankCompetitors(classified, 2);
+    expect(ranked.filter((r) => r.selected).map((r) => r.domain)).toEqual(["b.com", "d.com"]);
+  });
+});
+
+describe("classification parsing", () => {
+  test("accepts valid classifications and normalizes the domain", () => {
+    const result = validateClassifications({
+      domains: [
+        { domain: "www.Artisan.co", classification: "competitor", reasoning: "AI BDR", confidence: 0.9 },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.classifications[0]!.domain).toBe("artisan.co");
+  });
+
+  test("drops entries with an unknown classification", () => {
+    const result = validateClassifications({
+      domains: [
+        { domain: "a.com", classification: "competitor", reasoning: "x", confidence: 1 },
+        { domain: "b.com", classification: "rival-ish", reasoning: "x", confidence: 1 },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.classifications).toHaveLength(1);
+  });
+
+  test("rejects an unusable payload so the corrective retry fires", () => {
+    expect(validateClassifications({ domains: [] }).ok).toBe(false);
+    expect(validateClassifications("they are all competitors").ok).toBe(false);
+  });
+});
+
+describe("competitor prompt", () => {
+  test("carries the evidence and warns against loose competitor calls", () => {
+    const prompt = competitorsPrompt(
+      {
+        name: "Revnu", whatTheySell: "growth automation", audience: "b2b",
+        buyerType: "founders", pricePoint: null, businessStage: null,
+        category: "growth automation platform",
+      },
+      [
+        {
+          domain: "artisan.co", appearances: 2, averagePosition: 2, bestPosition: 1, score: 1.9,
+          evidence: [{ keyword: "ai bdr", position: 1 }],
+        },
+      ],
+    );
+    expect(prompt).toContain("artisan.co");
+    expect(prompt).toContain('"ai bdr" #1');
+    expect(prompt).toContain("Be strict");
+  });
+});
+
+describe("registrableDomain robustness", () => {
+  test("tolerates a full URL, a port, and a path", () => {
+    expect(registrableDomain("https://www.artisan.co/ai-sales-agent?x=1")).toBe("artisan.co");
+    expect(registrableDomain("http://localhost:3000")).toBe("localhost");
+    expect(registrableDomain("https://docs.saasquatch.com/guide")).toBe("saasquatch.com");
+  });
+});

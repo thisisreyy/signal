@@ -119,6 +119,8 @@ export default defineSchema({
     // so a dead provider stops the run early instead of grinding every
     // remaining step through its full retry budget.
     consecutiveFailures: v.optional(v.number()),
+    // How many competitors to carry forward into tracking (configurable).
+    topCompetitors: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -226,6 +228,40 @@ export default defineSchema({
   })
     .index("by_discoveryId", ["discoveryId"])
     .index("by_discoveryId_and_status", ["discoveryId", "status"]),
+
+  // Phase 4 output: every domain that ranked for a validated keyword, with
+  // the classification that decided whether it counts as competition and the
+  // evidence (which keywords, which positions) that identified it.
+  competitors: defineTable({
+    discoveryId: v.id("discoveryRuns"),
+    domain: v.string(),
+    classification: v.union(
+      v.literal("competitor"),
+      v.literal("adjacent"),
+      v.literal("directory"),
+      v.literal("forum"),
+      v.literal("media"),
+      v.literal("reference"),
+      v.literal("social"),
+      v.literal("marketplace"),
+      v.literal("other"),
+    ),
+    // "list" = hardcoded exclusion, "llm" = classified by model. Which
+    // mechanism made the call is itself inspectable.
+    decidedBy: v.union(v.literal("list"), v.literal("llm")),
+    reasoning: v.string(),
+    confidence: v.optional(v.number()),
+    appearances: v.number(),
+    averagePosition: v.number(),
+    bestPosition: v.number(),
+    score: v.number(),
+    evidence: v.array(v.object({ keyword: v.string(), position: v.number() })),
+    rank: v.optional(v.number()), // among true competitors only
+    selected: v.boolean(), // in the top N carried into tracking
+    createdAt: v.number(),
+  })
+    .index("by_discoveryId", ["discoveryId"])
+    .index("by_discoveryId_and_selected", ["discoveryId", "selected"]),
 
   // Singleton config, editable from the dashboard; the Worker reads it here so
   // there is one source of truth.

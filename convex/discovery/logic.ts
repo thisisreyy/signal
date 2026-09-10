@@ -21,13 +21,14 @@ export type DiscoveryState = (typeof DISCOVERY_STATES)[number];
  * "awaiting the next phase of the build", not stuck — the sweep leaves it
  * alone and the UI can say so honestly.
  */
-export const IMPLEMENTED_FRONTIER: DiscoveryState = "EXTRACTING_COMPETITORS";
+export const IMPLEMENTED_FRONTIER: DiscoveryState = "RECOMMENDING";
 
 export const STEP_KINDS = [
   "FETCH_PAGES",
   "PROFILE",
   "GENERATE_KEYWORDS",
   "VALIDATE_BATCH",
+  "EXTRACT_COMPETITORS",
 ] as const;
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -41,7 +42,7 @@ export const STEPS_FOR_STATE: Record<DiscoveryState, readonly StepKind[]> = {
   PROFILING: ["FETCH_PAGES", "PROFILE"],
   GENERATING_KEYWORDS: ["GENERATE_KEYWORDS"],
   VALIDATING: [], // data-driven: see nextValidationBatch / ensureValidationStep
-  EXTRACTING_COMPETITORS: [], // Phase 4
+  EXTRACTING_COMPETITORS: ["EXTRACT_COMPETITORS"],
   RECOMMENDING: [], // Phase 5
   COMPLETE: [],
   FAILED: [],
@@ -594,4 +595,303 @@ For each query, decide:
 - "ambiguous": genuinely mixed — some comparable companies alongside significant off-target results.
 
 Judge only from the ranking domains shown. They are the evidence; the query's wording is not. Echo each keyword exactly as given, and give one sentence of reasoning that cites what the domains show.`;
+}
+
+// ---------- Phase 4: competitor extraction ----------
+
+/** Default number of competitors carried forward into tracking. */
+export const DEFAULT_TOP_COMPETITORS = 5;
+/** Ceiling on domains sent to the classifier, so one call always suffices. */
+export const MAX_DOMAINS_TO_CLASSIFY = 30;
+/** A domain seen on only one keyword is noise, not a competitive pattern. */
+export const MIN_APPEARANCES = 1;
+
+/**
+ * Domains that rank constantly but are never the competition. Kept as a
+ * hardcoded first pass because these are unambiguous and free to exclude —
+ * spending an LLM call to decide whether reddit.com sells software would be
+ * both slower and less reliable than knowing it doesn't.
+ */
+export const EXCLUDED_DOMAINS: Record<string, string> = {
+  // Forums and aggregators
+  "reddit.com": "forum",
+  "quora.com": "forum",
+  "stackoverflow.com": "forum",
+  "stackexchange.com": "forum",
+  "ycombinator.com": "forum",
+  "indiehackers.com": "forum",
+  // Reference
+  "wikipedia.org": "reference",
+  "wiktionary.org": "reference",
+  "investopedia.com": "reference",
+  // Review sites and directories
+  "g2.com": "directory",
+  "capterra.com": "directory",
+  "trustpilot.com": "directory",
+  "trustradius.com": "directory",
+  "getapp.com": "directory",
+  "softwareadvice.com": "directory",
+  "producthunt.com": "directory",
+  "crunchbase.com": "directory",
+  "gartner.com": "directory",
+  "clutch.co": "directory",
+  "sourceforge.net": "directory",
+  "slashdot.org": "directory",
+  // Social and video
+  "linkedin.com": "social",
+  "facebook.com": "social",
+  "twitter.com": "social",
+  "x.com": "social",
+  "instagram.com": "social",
+  "tiktok.com": "social",
+  "youtube.com": "social",
+  "pinterest.com": "social",
+  // Publishing platforms and media
+  "medium.com": "media",
+  "substack.com": "media",
+  "forbes.com": "media",
+  "techcrunch.com": "media",
+  "businessinsider.com": "media",
+  "entrepreneur.com": "media",
+  "inc.com": "media",
+  "hbr.org": "media",
+  "wired.com": "media",
+  "theverge.com": "media",
+  "nytimes.com": "media",
+  // App stores and marketplaces
+  "apple.com": "marketplace",
+  "google.com": "marketplace",
+  "amazon.com": "marketplace",
+  "microsoft.com": "marketplace",
+  "github.com": "marketplace",
+};
+
+/** TLDs where the registrable domain needs three labels, not two. */
+const MULTI_PART_TLDS = new Set([
+  "co.uk", "com.au", "co.nz", "co.za", "com.br", "co.in", "co.jp",
+  "com.mx", "co.kr", "com.sg", "co.il", "com.tr",
+]);
+
+/**
+ * Collapse a hostname to the domain that identifies the company:
+ * docs.saasquatch.com → saasquatch.com, play.google.com → google.com.
+ * Subdomains are the same competitor, and treating them separately would
+ * both split the evidence and let excluded domains slip through.
+ */
+export function registrableDomain(host: string): string {
+  // Tolerate being handed a full URL rather than a bare hostname: silently
+  // producing "https://acme.com" as a "domain" would break every comparison
+  // downstream — exclusion checks, dedup, and the is-this-me test.
+  const clean = host
+    .toLowerCase()
+    .trim()
+    .replace(/^[a-z]+:\/\//, "")
+    .replace(/[/?#].*$/, "")
+    .replace(/:\d+$/, "")
+    .replace(/^www\./, "");
+  const parts = clean.split(".");
+  if (parts.length <= 2) return clean;
+  const lastTwo = parts.slice(-2).join(".");
+  if (MULTI_PART_TLDS.has(lastTwo)) return parts.slice(-3).join(".");
+  return lastTwo;
+}
+
+export function excludedCategory(domain: string): string | null {
+  return EXCLUDED_DOMAINS[registrableDomain(domain)] ?? null;
+}
+
+export interface DomainEvidence {
+  keyword: string;
+  position: number;
+}
+
+export interface DomainStats {
+  domain: string;
+  appearances: number;
+  averagePosition: number;
+  bestPosition: number;
+  score: number;
+  evidence: DomainEvidence[];
+}
+
+/**
+ * Position quality: 1.0 at rank #1, decaying to 0 by rank #21. Summing this
+ * across appearances means a domain is rewarded for BOTH ranking on many of
+ * the business's keywords and ranking well on them — one #1 outweighs three
+ * #18s, which matches how competitive pressure actually feels.
+ */
+export function positionScore(position: number): number {
+  return Math.max(0, 1 - (position - 1) / 20);
+}
+
+/**
+ * Aggregate every page-one domain across the validated keywords. The evidence
+ * for each domain is carried along, because a competitor with no attached
+ * proof is exactly the unsupported claim this pipeline refuses to ship.
+ */
+export function aggregateDomains(
+  validated: readonly {
+    keyword: string;
+    topDomains: readonly { domain: string; position: number }[];
+  }[],
+  businessDomain?: string,
+): DomainStats[] {
+  const business = businessDomain ? registrableDomain(businessDomain) : null;
+  const byDomain = new Map<string, DomainEvidence[]>();
+
+  for (const { keyword, topDomains } of validated) {
+    // One appearance per (domain, keyword): a domain holding three slots on
+    // one page is still one competitor on one keyword.
+    const bestPerDomain = new Map<string, number>();
+    for (const result of topDomains) {
+      const domain = registrableDomain(result.domain);
+      if (business && domain === business) continue; // never your own competitor
+      const existing = bestPerDomain.get(domain);
+      if (existing === undefined || result.position < existing) {
+        bestPerDomain.set(domain, result.position);
+      }
+    }
+    for (const [domain, position] of bestPerDomain) {
+      const list = byDomain.get(domain) ?? [];
+      list.push({ keyword, position });
+      byDomain.set(domain, list);
+    }
+  }
+
+  return [...byDomain.entries()]
+    .map(([domain, evidence]) => ({
+      domain,
+      appearances: evidence.length,
+      averagePosition:
+        Math.round((evidence.reduce((s, e) => s + e.position, 0) / evidence.length) * 10) / 10,
+      bestPosition: Math.min(...evidence.map((e) => e.position)),
+      score: Math.round(evidence.reduce((s, e) => s + positionScore(e.position), 0) * 100) / 100,
+      evidence,
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+export const DOMAIN_CLASSES = [
+  "competitor", // sells something comparable to the profiled business
+  "adjacent", // real company, related market, not directly comparable
+  "directory", // review site, listing, marketplace
+  "forum", // community or discussion
+  "media", // news, blog, publisher
+  "reference", // encyclopedic or educational
+  "other",
+] as const;
+export type DomainClass = (typeof DOMAIN_CLASSES)[number];
+
+export interface DomainClassification {
+  domain: string;
+  classification: DomainClass;
+  reasoning: string;
+  confidence: number;
+}
+
+export const COMPETITORS_TOOL_SCHEMA = {
+  name: "classify_ranking_domains",
+  description:
+    "Classify each domain that ranks for this business's validated keywords, deciding which are genuinely selling something comparable.",
+  input_schema: {
+    type: "object",
+    properties: {
+      domains: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            domain: { type: "string", description: "Echo the domain exactly as given" },
+            classification: { type: "string", enum: [...DOMAIN_CLASSES] },
+            reasoning: { type: "string", description: "One short sentence" },
+            confidence: { type: "number", description: "0..1" },
+          },
+          required: ["domain", "classification", "reasoning", "confidence"],
+        },
+      },
+    },
+    required: ["domains"],
+  },
+} as const;
+
+export function validateClassifications(
+  raw: unknown,
+): { ok: true; classifications: DomainClassification[] } | { ok: false; reason: string } {
+  if (typeof raw !== "object" || raw === null) {
+    return { ok: false, reason: "payload is not an object" };
+  }
+  const list = (raw as Record<string, unknown>).domains;
+  if (!Array.isArray(list)) return { ok: false, reason: "domains must be an array" };
+  if (list.length === 0) return { ok: false, reason: "domains array is empty" };
+
+  const classifications: DomainClassification[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.domain !== "string") continue;
+    if (!DOMAIN_CLASSES.includes(o.classification as DomainClass)) continue;
+    classifications.push({
+      domain: registrableDomain(o.domain),
+      classification: o.classification as DomainClass,
+      reasoning:
+        typeof o.reasoning === "string" ? o.reasoning.trim().slice(0, 300) : "(no reasoning given)",
+      confidence:
+        typeof o.confidence === "number" && o.confidence >= 0 && o.confidence <= 1
+          ? o.confidence
+          : 0.5,
+    });
+  }
+  if (classifications.length === 0) {
+    return { ok: false, reason: "no well-formed classifications in the payload" };
+  }
+  return { ok: true, classifications };
+}
+
+export function competitorsPrompt(
+  profile: StoredProfile,
+  domains: readonly DomainStats[],
+): string {
+  const field = (label: string, value: string | null) => `${label}: ${value ?? "(unknown)"}`;
+  const listing = domains
+    .map(
+      (d) =>
+        `- ${d.domain} — ranks for ${d.appearances} keyword(s), best #${d.bestPosition}, e.g. ${d.evidence
+          .slice(0, 3)
+          .map((e) => `"${e.keyword}" #${e.position}`)
+          .join("; ")}`,
+    )
+    .join("\n");
+
+  return `Classify the domains that rank for this business's validated search terms.
+
+BUSINESS
+${field("Name", profile.name)}
+${field("Category", profile.category)}
+${field("What they sell", profile.whatTheySell)}
+${field("Audience", profile.audience)}
+${field("Buyer", profile.buyerType)}
+
+DOMAINS
+${listing}
+
+For each domain choose exactly one classification:
+- "competitor": a company selling a product or service genuinely comparable to this business — a buyer could choose them instead.
+- "adjacent": a real company in a related market, but not something a buyer would consider a substitute.
+- "directory": review sites, listings, marketplaces, app stores.
+- "forum": community and discussion sites.
+- "media": news outlets, blogs, publishers, listicle sites.
+- "reference": encyclopedic or educational resources.
+- "other": anything else, including sites you cannot identify.
+
+Be strict about "competitor" — ranking for the same keyword is not the same as competing for the same buyer. When you are unsure what a domain sells, say "other" with low confidence rather than guessing.`;
+}
+
+/** Final ordering and selection: only true competitors, best score first. */
+export function rankCompetitors<
+  T extends { domain: string; classification: DomainClass; score: number },
+>(classified: readonly T[], topN: number = DEFAULT_TOP_COMPETITORS): (T & { rank: number; selected: boolean })[] {
+  return classified
+    .filter((c) => c.classification === "competitor")
+    .sort((a, b) => b.score - a.score)
+    .map((c, index) => ({ ...c, rank: index + 1, selected: index < topN }));
 }
