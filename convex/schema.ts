@@ -299,7 +299,9 @@ export default defineSchema({
     dueAt: v.number(),
     scoredAt: v.optional(v.number()),
     actualRank: v.optional(v.number()),
-    delta: v.optional(v.number()), // predicted - actual; negative = beat it
+    // predicted - actual. POSITIVE means the outcome beat the prediction
+    // (a lower rank number is better), negative means it fell short.
+    delta: v.optional(v.number()),
     scoringNote: v.optional(v.string()),
     createdAt: v.number(),
   })

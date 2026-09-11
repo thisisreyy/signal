@@ -1184,3 +1184,143 @@ Produce up to ${MAX_RECOMMENDATIONS} recommendations. For each one:
 
 Do not invent a ranking, a competitor, or a keyword that is not listed above.`;
 }
+
+// ---------- Phase 6: the outcome loop ----------
+
+/** How often due predictions are checked. Predictions are day-scale. */
+export const SCORING_INTERVAL_HOURS = 1;
+
+export interface Measurement {
+  /** Is the keyword still being tracked by the daily agent? */
+  tracked: boolean;
+  /** When the measurement was taken. */
+  measuredAt?: number;
+  /** The business's position, absent if it does not rank. */
+  measuredRank?: number;
+  /** The measurement itself failed (a fetch error), so it says nothing. */
+  errored?: boolean;
+}
+
+export interface ScoringOutcome {
+  status: "correct" | "incorrect" | "inconclusive";
+  actualRank?: number;
+  delta?: number;
+  note: string;
+}
+
+/**
+ * Score one prediction against what was actually measured.
+ *
+ * The distinction that matters is between "we measured, and the prediction
+ * missed" (incorrect) and "we never got a measurement worth judging"
+ * (inconclusive). Collapsing those would let a system quietly improve its
+ * own accuracy by losing data, so an absent measurement is never a miss and
+ * never a hit.
+ *
+ * A prediction is also never scored against data that predates it — you
+ * cannot confirm a forecast with a measurement taken before it was made.
+ */
+export function scoreRecommendation(
+  predictedRank: number,
+  createdAt: number,
+  measurement: Measurement | null,
+): ScoringOutcome {
+  if (!measurement || !measurement.tracked) {
+    return {
+      status: "inconclusive",
+      note: "The keyword is no longer tracked, so no outcome could be observed.",
+    };
+  }
+  if (measurement.errored) {
+    return {
+      status: "inconclusive",
+      note: "The most recent check for this keyword failed, so the outcome is unknown.",
+    };
+  }
+  if (measurement.measuredAt === undefined) {
+    return {
+      status: "inconclusive",
+      note: "No ranking check has recorded this keyword yet.",
+    };
+  }
+  if (measurement.measuredAt <= createdAt) {
+    return {
+      status: "inconclusive",
+      note: "No ranking check has run since the prediction was made.",
+    };
+  }
+  if (measurement.measuredRank === undefined) {
+    // We DID measure. Not ranking is a real, observed miss — not missing data.
+    return {
+      status: "incorrect",
+      note: `Predicted #${predictedRank}, but the business still does not rank in the top 20.`,
+    };
+  }
+
+  const actual = measurement.measuredRank;
+  const delta = predictedRank - actual; // positive = beat the prediction
+  if (actual <= predictedRank) {
+    return {
+      status: "correct",
+      actualRank: actual,
+      delta,
+      note:
+        delta === 0
+          ? `Predicted #${predictedRank} and landed exactly there.`
+          : `Predicted #${predictedRank}, reached #${actual} — beat it by ${delta}.`,
+    };
+  }
+  return {
+    status: "incorrect",
+    actualRank: actual,
+    delta,
+    note: `Predicted #${predictedRank}, reached #${actual} — short by ${Math.abs(delta)}.`,
+  };
+}
+
+export interface AccuracySummary {
+  open: number;
+  correct: number;
+  incorrect: number;
+  inconclusive: number;
+  /** correct / (correct + incorrect). Null until something has been judged. */
+  accuracyRate: number | null;
+  /** Mean delta over scored-with-a-rank predictions; positive = beating them. */
+  averageDelta: number | null;
+}
+
+/**
+ * Aggregate accuracy. Inconclusive results are deliberately excluded from the
+ * denominator: they are absence of evidence, and counting them either way
+ * would make the rate say something it does not know.
+ */
+export function summarizeAccuracy(
+  recommendations: readonly { status: string; delta?: number }[],
+): AccuracySummary {
+  let open = 0;
+  let correct = 0;
+  let incorrect = 0;
+  let inconclusive = 0;
+  const deltas: number[] = [];
+
+  for (const rec of recommendations) {
+    if (rec.status === "open") open += 1;
+    else if (rec.status === "correct") correct += 1;
+    else if (rec.status === "incorrect") incorrect += 1;
+    else if (rec.status === "inconclusive") inconclusive += 1;
+    if (typeof rec.delta === "number") deltas.push(rec.delta);
+  }
+
+  const judged = correct + incorrect;
+  return {
+    open,
+    correct,
+    incorrect,
+    inconclusive,
+    accuracyRate: judged > 0 ? Math.round((correct / judged) * 100) / 100 : null,
+    averageDelta:
+      deltas.length > 0
+        ? Math.round((deltas.reduce((s, d) => s + d, 0) / deltas.length) * 10) / 10
+        : null,
+  };
+}

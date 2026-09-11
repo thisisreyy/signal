@@ -22,6 +22,9 @@ import {
   DOMAIN_CLASSES,
   MAX_RECOMMENDATIONS,
   nextStepKind,
+  scoreRecommendation,
+  summarizeAccuracy,
+  type Measurement,
   nextValidationBatch,
   STEP_STALE_MS,
   stepKey,
@@ -985,6 +988,146 @@ export const sweep = internalMutation({
         if (kind) await insertStepAndSchedule(ctx, run._id, kind, run.url);
       }
     }
+  },
+});
+
+// ---------- Phase 6: the outcome loop ----------
+
+/**
+ * The measured truth for one keyword, read from the DAILY TRACKER — the same
+ * records the live dashboard shows. Recommendations are never scored against
+ * discovery-time data: a prediction made from a discovery snapshot must be
+ * judged by an independent measurement taken afterwards.
+ */
+async function measureKeyword(ctx: MutationCtx, keyword: string): Promise<Measurement> {
+  const config = await ctx.db
+    .query("config")
+    .withIndex("by_key", (q) => q.eq("key", "singleton"))
+    .unique();
+  const tracked = (config?.keywords ?? []).includes(keyword);
+  if (!tracked) return { tracked: false };
+
+  // Most recent checks for this keyword, newest first.
+  const recent = await ctx.db
+    .query("keywordChecks")
+    .withIndex("by_keyword", (q) => q.eq("keyword", keyword))
+    .order("desc")
+    .take(10);
+
+  for (const row of recent) {
+    const run = await ctx.db.get(row.runId);
+    if (!run || run.status !== "succeeded") continue; // only trust finished runs
+    if (row.error !== undefined) return { tracked: true, errored: true, measuredAt: row.checkedAt };
+    return {
+      tracked: true,
+      measuredAt: row.checkedAt,
+      measuredRank: row.positions.find((p) => p.isBusiness)?.position,
+    };
+  }
+  return { tracked: true };
+}
+
+/**
+ * Score one pending recommendation in place.
+ *
+ * "open" and "inconclusive" are both re-scorable; a settled verdict is not.
+ * Inconclusive means "could not be judged YET" — usually because no check has
+ * run since the prediction — and that reason expires. Treating it as final
+ * would permanently discard predictions that were merely early.
+ */
+async function scoreOne(ctx: MutationCtx, recId: Id<"recommendations">) {
+  const rec = await ctx.db.get(recId);
+  if (!rec) return null;
+  if (rec.status === "correct" || rec.status === "incorrect") return null; // settled
+
+  const measurement = await measureKeyword(ctx, rec.expectedOutcome.keyword);
+  const outcome = scoreRecommendation(
+    rec.expectedOutcome.predictedRank,
+    rec.createdAt,
+    measurement,
+  );
+  await ctx.db.patch(rec._id, {
+    status: outcome.status,
+    actualRank: outcome.actualRank,
+    delta: outcome.delta,
+    scoringNote: outcome.note,
+    scoredAt: Date.now(),
+  });
+  return outcome;
+}
+
+/**
+ * The cron-driven loop: every prediction whose timeframe has elapsed gets
+ * compared against real measurements, with no human scoring anything.
+ */
+export const scoreDueRecommendations = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    // Both pending states: an inconclusive verdict is revisited once a
+    // measurement finally exists.
+    const due = [
+      ...(await ctx.db
+        .query("recommendations")
+        .withIndex("by_status_and_dueAt", (q) => q.eq("status", "open").lte("dueAt", now))
+        .take(50)),
+      ...(await ctx.db
+        .query("recommendations")
+        .withIndex("by_status_and_dueAt", (q) =>
+          q.eq("status", "inconclusive").lte("dueAt", now),
+        )
+        .take(50)),
+    ];
+    let scored = 0;
+    for (const rec of due) {
+      if (await scoreOne(ctx, rec._id)) scored += 1;
+    }
+    return { considered: due.length, scored };
+  },
+});
+
+/**
+ * Manual scoring, for demonstrating the loop without waiting out a 90-day
+ * timeframe. Identical logic to the cron path — it only bypasses the clock,
+ * never the evidence.
+ */
+export const scoreNow = mutation({
+  args: { discoveryId: v.id("discoveryRuns") },
+  handler: async (ctx, args) => {
+    const open = await ctx.db
+      .query("recommendations")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(MAX_RECOMMENDATIONS * 2);
+    const results: { keyword: string; status: string; note: string }[] = [];
+    for (const rec of open) {
+      if (rec.status === "correct" || rec.status === "incorrect") continue;
+      const outcome = await scoreOne(ctx, rec._id);
+      if (outcome) {
+        results.push({
+          keyword: rec.expectedOutcome.keyword,
+          status: outcome.status,
+          note: outcome.note,
+        });
+      }
+    }
+    return results;
+  },
+});
+
+/**
+ * "How often are my recommendations right?" — answered from scored outcomes,
+ * with inconclusive results excluded from the denominator.
+ */
+export const accuracy = query({
+  args: { discoveryId: v.optional(v.id("discoveryRuns")) },
+  handler: async (ctx, args) => {
+    const rows = args.discoveryId
+      ? await ctx.db
+          .query("recommendations")
+          .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId!))
+          .take(200)
+      : await ctx.db.query("recommendations").order("desc").take(200);
+    return summarizeAccuracy(rows);
   },
 });
 

@@ -863,3 +863,119 @@ describe("recommendation prompt", () => {
     expect(prompt).toContain("Do not invent");
   });
 });
+
+// ---------- Phase 6: the outcome loop ----------
+
+import {
+  scoreRecommendation,
+  summarizeAccuracy,
+  type Measurement,
+} from "../../convex/discovery/logic";
+
+const MADE_AT = 1_000_000;
+const measured = (over: Partial<Measurement> = {}): Measurement => ({
+  tracked: true,
+  measuredAt: MADE_AT + 10_000,
+  ...over,
+});
+
+describe("scoring a prediction against measurement", () => {
+  test("hitting the predicted rank exactly is correct", () => {
+    const r = scoreRecommendation(5, MADE_AT, measured({ measuredRank: 5 }));
+    expect(r.status).toBe("correct");
+    expect(r.delta).toBe(0);
+  });
+
+  test("beating the prediction is correct, with a positive delta", () => {
+    const r = scoreRecommendation(5, MADE_AT, measured({ measuredRank: 2 }));
+    expect(r.status).toBe("correct");
+    expect(r.delta).toBe(3); // positive = beat it
+    expect(r.note).toContain("beat it");
+  });
+
+  test("falling short is incorrect, with a negative delta", () => {
+    const r = scoreRecommendation(5, MADE_AT, measured({ measuredRank: 12 }));
+    expect(r.status).toBe("incorrect");
+    expect(r.delta).toBe(-7);
+    expect(r.actualRank).toBe(12);
+  });
+
+  test("still not ranking is a measured miss, not missing data", () => {
+    const r = scoreRecommendation(5, MADE_AT, measured({ measuredRank: undefined }));
+    expect(r.status).toBe("incorrect");
+    expect(r.note).toContain("does not rank");
+  });
+});
+
+describe("scoring refuses to judge what it cannot observe", () => {
+  test("an untracked keyword is inconclusive, never a miss", () => {
+    const r = scoreRecommendation(5, MADE_AT, { tracked: false });
+    expect(r.status).toBe("inconclusive");
+    expect(r.note).toContain("no longer tracked");
+  });
+
+  test("a failed measurement is inconclusive", () => {
+    const r = scoreRecommendation(5, MADE_AT, measured({ errored: true }));
+    expect(r.status).toBe("inconclusive");
+  });
+
+  test("no measurement at all is inconclusive", () => {
+    expect(scoreRecommendation(5, MADE_AT, null).status).toBe("inconclusive");
+    expect(scoreRecommendation(5, MADE_AT, { tracked: true }).status).toBe("inconclusive");
+  });
+
+  test("a measurement taken BEFORE the prediction cannot confirm it", () => {
+    const stale = measured({ measuredAt: MADE_AT - 5_000, measuredRank: 1 });
+    const r = scoreRecommendation(5, MADE_AT, stale);
+    expect(r.status).toBe("inconclusive"); // would otherwise be a free "correct"
+    expect(r.note).toContain("since the prediction was made");
+  });
+});
+
+describe("aggregate accuracy", () => {
+  test("inconclusive results are excluded from the denominator", () => {
+    const s = summarizeAccuracy([
+      { status: "correct", delta: 2 },
+      { status: "incorrect", delta: -3 },
+      { status: "inconclusive" },
+      { status: "inconclusive" },
+      { status: "open" },
+    ]);
+    expect(s.accuracyRate).toBe(0.5); // 1 of 2 judged, not 1 of 4
+    expect(s.inconclusive).toBe(2);
+    expect(s.open).toBe(1);
+  });
+
+  test("accuracy is null until something has actually been judged", () => {
+    expect(summarizeAccuracy([{ status: "open" }, { status: "inconclusive" }]).accuracyRate)
+      .toBeNull();
+  });
+
+  test("average delta shows whether predictions run optimistic or conservative", () => {
+    const s = summarizeAccuracy([
+      { status: "correct", delta: 4 },
+      { status: "incorrect", delta: -2 },
+    ]);
+    expect(s.averageDelta).toBe(1);
+  });
+
+  test("losing data can never improve the accuracy rate", () => {
+    const withData = summarizeAccuracy([{ status: "correct" }, { status: "incorrect" }]);
+    const dataLost = summarizeAccuracy([{ status: "correct" }, { status: "inconclusive" }]);
+    expect(withData.accuracyRate).toBe(0.5);
+    expect(dataLost.accuracyRate).toBe(1); // rate rises...
+    expect(dataLost.correct + dataLost.incorrect).toBe(1); // ...but on a smaller base,
+    expect(dataLost.inconclusive).toBe(1); // and the gap is reported, not hidden
+  });
+});
+
+describe("bugfix: an inconclusive verdict is revisited, not final", () => {
+  test("the same prediction becomes judgeable once a measurement arrives", () => {
+    // First attempt: no check has run since the prediction.
+    const early = scoreRecommendation(5, MADE_AT, { tracked: true });
+    expect(early.status).toBe("inconclusive");
+    // Later, a real measurement exists — the verdict must be reachable.
+    const later = scoreRecommendation(5, MADE_AT, measured({ measuredRank: 3 }));
+    expect(later.status).toBe("correct");
+  });
+});
