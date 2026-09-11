@@ -1,0 +1,15 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "Discover" },
+    { "file": "Running.dc.html", "x": 1560, "y": 0, "w": 1440, "h": 900, "title": "Live progress" },
+    { "file": "Keywords.dc.html", "x": 3120, "y": 0, "w": 1440, "h": 1100, "title": "Keywords + verdicts" },
+    { "file": "Competitors.dc.html", "x": 0, "y": 1320, "w": 1440, "h": 1150, "title": "Competitors" },
+    { "file": "Recommendations.dc.html", "x": 1560, "y": 1320, "w": 1440, "h": 1200, "title": "Recommendations" },
+    { "file": "Accuracy.dc.html", "x": 3120, "y": 1320, "w": 1440, "h": 950, "title": "Accuracy" }
+  ],
+  "annotations": [
+    { "id": "flow-note", "x": 0, "y": -150, "w": 460, "text": "Discovery flow — top row is what happens before any data exists: paste a URL, watch it work.\n\nBottom row is the result: what it found, who it found, what it advises, and whether it was right." },
+    { "id": "evidence-note", "x": 3120, "y": -150, "w": 440, "text": "Every automated decision carries its evidence in-place — the page-one domains that produced the verdict, the keyword and position behind each recommendation." }
+  ],
+  "launch": { "view": "canvas" }
+}

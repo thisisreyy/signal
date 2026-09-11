@@ -26,6 +26,7 @@ import {
   summarizeAccuracy,
   type Measurement,
   nextValidationBatch,
+  normalizeKeyword,
   STEP_STALE_MS,
   stepKey,
   VERDICTS,
@@ -988,6 +989,67 @@ export const sweep = internalMutation({
         if (kind) await insertStepAndSchedule(ctx, run._id, kind, run.url);
       }
     }
+  },
+});
+
+// ---------- Human review: discovery proposes, a person decides ----------
+
+/** Accept or reject one proposed keyword. */
+export const setCandidateStatus = mutation({
+  args: {
+    candidateId: v.id("keywordCandidates"),
+    status: v.union(
+      v.literal("relevant"),
+      v.literal("irrelevant"),
+      v.literal("unvalidated"),
+    ),
+  },
+  handler: async (ctx, args) => {
+    const candidate = await ctx.db.get(args.candidateId);
+    if (!candidate) throw new Error("keyword not found");
+    await ctx.db.patch(args.candidateId, { status: args.status });
+  },
+});
+
+/** Add a keyword by hand. It joins the queue and gets tested like any other. */
+export const addCandidate = mutation({
+  args: { discoveryId: v.id("discoveryRuns"), keyword: v.string() },
+  handler: async (ctx, args) => {
+    const keyword = normalizeKeyword(args.keyword);
+    if (keyword.length < 2) throw new Error("Enter a keyword");
+
+    const existing = await ctx.db
+      .query("keywordCandidates")
+      .withIndex("by_discoveryId", (q) => q.eq("discoveryId", args.discoveryId))
+      .take(MAX_CANDIDATES);
+    if (existing.some((c) => c.keyword === keyword)) return { added: false };
+
+    await ctx.db.insert("keywordCandidates", {
+      discoveryId: args.discoveryId,
+      keyword,
+      kind: "category",
+      rationale: "Added by hand.",
+      status: "unvalidated",
+      createdAt: Date.now(),
+    });
+    // An unvalidated keyword means the run has work again: re-enter VALIDATING
+    // so the same batch machinery tests it exactly like a proposed one.
+    const run = await ctx.db.get(args.discoveryId);
+    if (run && (run.state === "COMPLETE" || run.state === "EXTRACTING_COMPETITORS")) {
+      await ctx.db.patch(run._id, { state: "VALIDATING", updatedAt: Date.now() });
+      await ensureValidationStep(ctx, run._id);
+    }
+    return { added: true };
+  },
+});
+
+/** Include or exclude a competitor from what gets tracked. */
+export const setCompetitorSelected = mutation({
+  args: { competitorId: v.id("competitors"), selected: v.boolean() },
+  handler: async (ctx, args) => {
+    const row = await ctx.db.get(args.competitorId);
+    if (!row) throw new Error("competitor not found");
+    await ctx.db.patch(args.competitorId, { selected: args.selected });
   },
 });
 

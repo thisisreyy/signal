@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650;12..96,800&display=swap">
+  <style>
+    body { margin:0; background:#131210; color:#f3eee3; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased; }
+    a { color:#9d92f0; text-decoration:none; }
+    a:hover { color:#b9b1f5; }
+    h1,h2,h3 { font-family:"Bricolage Grotesque", system-ui, sans-serif; margin:0; letter-spacing:-0.012em; }
+  </style>
+</helmet>
+<div style="min-height:950px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:14px;padding:16px 32px;border-bottom:1px solid rgba(240,230,205,0.09);">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,#9d92f0,#6d5ae6);box-shadow:0 4px 18px rgba(109,90,230,0.35);display:grid;place-items:center;">
+        <div style="width:10px;height:10px;border-radius:50%;background:#131210;"></div>
+      </div>
+      <h1 style="font-size:19px;font-weight:700;">Signal</h1>
+      <div style="display:flex;gap:2px;margin-left:20px;">
+        <div style="padding:6px 14px;border-radius:999px;font-size:13.5px;color:#978e7d;">Rankings</div>
+        <div style="padding:6px 14px;border-radius:999px;font-size:13.5px;font-weight:600;color:#f3eee3;background:rgba(148,135,235,0.12);">Discovery</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#978e7d;">revnu.com</div>
+      <div style="padding:8px 18px;border-radius:999px;border:1px solid rgba(240,230,205,0.18);font-size:13.5px;font-weight:600;">New discovery</div>
+    </div>
+  </div>
+  <div style="max-width:1120px;margin:0 auto;padding:40px 32px;">
+
+    <div style="display:flex;gap:2px;margin-bottom:34px;border-bottom:1px solid rgba(240,230,205,0.09);">
+      <div style="padding:10px 16px;font-size:14px;color:#978e7d;">Keywords</div>
+      <div style="padding:10px 16px;font-size:14px;color:#978e7d;">Competitors</div>
+      <div style="padding:10px 16px;font-size:14px;color:#978e7d;">Recommendations</div>
+      <div style="padding:10px 16px;font-size:14px;font-weight:600;color:#f3eee3;border-bottom:2px solid #9d92f0;margin-bottom:-1px;">Accuracy</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:300px 1fr;gap:56px;align-items:start;">
+
+      <div>
+        <div style="display:inline-flex;align-items:center;gap:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;color:#978e7d;margin-bottom:14px;">
+          <span style="width:6px;height:6px;border-radius:50%;background:#ec7d76;box-shadow:0 0 10px rgba(236,125,118,0.7);"></span>
+          Self-scored
+        </div>
+        <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:76px;font-weight:800;line-height:1;letter-spacing:-0.03em;">0%</div>
+        <div style="font-size:15px;color:#cdc5b4;margin-top:8px;">of predictions came true</div>
+        <p style="font-size:13px;color:#978e7d;margin:16px 0 0;">4 deadlines have passed. None were met — Revnu still does not rank for any of the four keywords.</p>
+
+        <div style="margin-top:26px;display:flex;flex-direction:column;gap:1px;">
+          <div style="display:flex;justify-content:space-between;padding:11px 0;border-top:1px solid rgba(240,230,205,0.09);font-size:13.5px;">
+            <span style="color:#43c374;">Correct</span><span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">0</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:11px 0;border-top:1px solid rgba(240,230,205,0.09);font-size:13.5px;">
+            <span style="color:#ec7d76;">Missed</span><span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">4</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:11px 0;border-top:1px solid rgba(240,230,205,0.09);font-size:13.5px;">
+            <span style="color:#978e7d;">Couldn't judge</span><span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#978e7d;">0</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:11px 0;border-top:1px solid rgba(240,230,205,0.09);border-bottom:1px solid rgba(240,230,205,0.09);font-size:13.5px;">
+            <span style="color:#9d92f0;">Still open</span><span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#9d92f0;">0</span>
+          </div>
+        </div>
+
+        <div style="margin-top:22px;padding:14px 16px;border-radius:12px;background:rgba(0,0,0,0.25);border:1px solid rgba(240,230,205,0.09);">
+          <div style="font-size:12.5px;color:#cdc5b4;font-weight:600;margin-bottom:5px;">Why “couldn't judge” is counted separately</div>
+          <div style="font-size:12.5px;color:#978e7d;line-height:1.6;">If a keyword stops being tracked, that prediction is set aside rather than forgiven. Folding it into the score would let the number improve by losing data.</div>
+        </div>
+      </div>
+
+      <div>
+        <h2 style="font-size:22px;font-weight:720;margin-bottom:4px;">Every prediction, graded</h2>
+        <p style="color:#978e7d;font-size:13px;margin:0 0 20px;">Compared against the same daily measurements the rankings page shows. No one grades these by hand.</p>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:0 0 9px;border-bottom:1px solid rgba(240,230,205,0.18);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:#978e7d;">
+          <div>Keyword</div><div>Predicted</div><div>Actual</div><div>Verdict</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:15px 0;border-bottom:1px solid rgba(240,230,205,0.09);align-items:center;">
+          <div>
+            <div style="font-size:14px;color:#cdc5b4;">“growth automation software”</div>
+            <div style="font-size:12px;color:#978e7d;margin-top:3px;">Predicted #5, but the business still does not rank in the top 20.</div>
+          </div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;">#5</div>
+          <div style="font-size:13px;color:#978e7d;">not ranked</div>
+          <div><span style="padding:3px 11px;border-radius:999px;background:rgba(236,125,118,0.12);color:#ec7d76;font-size:12px;font-weight:650;">missed</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:15px 0;border-bottom:1px solid rgba(240,230,205,0.09);align-items:center;">
+          <div>
+            <div style="font-size:14px;color:#cdc5b4;">“social media automation for startups”</div>
+            <div style="font-size:12px;color:#978e7d;margin-top:3px;">Predicted #4, but the business still does not rank in the top 20.</div>
+          </div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;">#4</div>
+          <div style="font-size:13px;color:#978e7d;">not ranked</div>
+          <div><span style="padding:3px 11px;border-radius:999px;background:rgba(236,125,118,0.12);color:#ec7d76;font-size:12px;font-weight:650;">missed</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:15px 0;border-bottom:1px solid rgba(240,230,205,0.09);align-items:center;">
+          <div>
+            <div style="font-size:14px;color:#cdc5b4;">“best marketing automation tools”</div>
+            <div style="font-size:12px;color:#978e7d;margin-top:3px;">Predicted #6, but the business still does not rank in the top 20.</div>
+          </div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;">#6</div>
+          <div style="font-size:13px;color:#978e7d;">not ranked</div>
+          <div><span style="padding:3px 11px;border-radius:999px;background:rgba(236,125,118,0.12);color:#ec7d76;font-size:12px;font-weight:650;">missed</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:15px 0;border-bottom:1px solid rgba(240,230,205,0.09);align-items:center;">
+          <div>
+            <div style="font-size:14px;color:#cdc5b4;">“saas marketing automation platform”</div>
+            <div style="font-size:12px;color:#978e7d;margin-top:3px;">Predicted #5, but the business still does not rank in the top 20.</div>
+          </div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;">#5</div>
+          <div style="font-size:13px;color:#978e7d;">not ranked</div>
+          <div><span style="padding:3px 11px;border-radius:999px;background:rgba(236,125,118,0.12);color:#ec7d76;font-size:12px;font-weight:650;">missed</span></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 92px 92px 110px;gap:16px;padding:15px 0;border-bottom:1px solid rgba(240,230,205,0.09);align-items:center;opacity:0.55;">
+          <div>
+            <div style="font-size:14px;color:#cdc5b4;">“ai bdr” <span style="font-size:11.5px;color:#978e7d;">— example of a hit</span></div>
+            <div style="font-size:12px;color:#978e7d;margin-top:3px;">Predicted #12, reached #9 — beat it by 3.</div>
+          </div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;">#12</div>
+          <div style="font-family:'Bricolage Grotesque',system-ui,sans-serif;font-size:19px;font-weight:700;color:#43c374;">#9</div>
+          <div><span style="padding:3px 11px;border-radius:999px;background:rgba(67,195,116,0.13);color:#43c374;font-size:12px;font-weight:650;">correct</span></div>
+        </div>
+
+        <div style="margin-top:22px;display:flex;align-items:center;gap:12px;font-size:12.5px;color:#978e7d;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#978e7d" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          Deadlines are checked hourly. A prediction is never scored against a measurement taken before it was made.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,650;12..96,800&display=swap">
+  <style>
+    body { margin:0; background:#131210; color:#f3eee3; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased; }
+    a { color:#9d92f0; text-decoration:none; }
+    a:hover { color:#b9b1f5; }
+    h1,h2,h3 { font-family:"Bricolage Grotesque", system-ui, sans-serif; margin:0; letter-spacing:-0.012em; }
+  </style>
+</helmet>

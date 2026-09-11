@@ -1,0 +1,16 @@
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:14px;padding:16px 32px;border-bottom:1px solid rgba(240,230,205,0.09);">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div style="width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,#9d92f0,#6d5ae6);box-shadow:0 4px 18px rgba(109,90,230,0.35);display:grid;place-items:center;">
+        <div style="width:10px;height:10px;border-radius:50%;background:#131210;"></div>
+      </div>
+      <h1 style="font-size:19px;font-weight:700;">Signal</h1>
+      <div style="display:flex;gap:2px;margin-left:20px;">
+        <div style="padding:6px 14px;border-radius:999px;font-size:13.5px;color:#978e7d;">Rankings</div>
+        <div style="padding:6px 14px;border-radius:999px;font-size:13.5px;font-weight:600;color:#f3eee3;background:rgba(148,135,235,0.12);">Discovery</div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#978e7d;">revnu.com</div>
+      <div style="padding:8px 18px;border-radius:999px;border:1px solid rgba(240,230,205,0.18);font-size:13.5px;font-weight:600;">New discovery</div>
+    </div>
+  </div>

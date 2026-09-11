@@ -8,6 +8,7 @@ import { KeywordCard } from "./components/KeywordCard";
 import { SignalsFeed } from "./components/SignalsFeed";
 import { TrackingPanel } from "./components/TrackingPanel";
 import { useCalm } from "./components/motion";
+import { DiscoveryView } from "./components/discovery/DiscoveryView";
 import { triggerCheck, useNowTick } from "./lib";
 
 /** Static, restrained page depth — two fixed radial illuminations. */
@@ -27,6 +28,7 @@ export default function App() {
   const setPaused = useMutation(api.admin.setPaused);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [view, setView] = useState<"rankings" | "discovery">("rankings");
   const calm = useCalm();
   useNowTick();
 
@@ -69,7 +71,21 @@ export default function App() {
               <span className={`logo-dot ${state.paused ? "logo-paused" : "logo-live"}`} />
             </motion.span>
             <h1>Signal</h1>
-            {latestSource === "simulated" && (
+            <nav className="nav" aria-label="Sections">
+              <button
+                className={`nav-tab ${view === "rankings" ? "active" : ""}`}
+                onClick={() => setView("rankings")}
+              >
+                Rankings
+              </button>
+              <button
+                className={`nav-tab ${view === "discovery" ? "active" : ""}`}
+                onClick={() => setView("discovery")}
+              >
+                Discovery
+              </button>
+            </nav>
+            {latestSource === "simulated" && view === "rankings" && (
               <span
                 className="chip-tag chip-demo"
                 title="No SERPER_API_KEY configured — rankings are fabricated demo data. Add the key to switch to real Google results."
@@ -78,7 +94,7 @@ export default function App() {
               </span>
             )}
           </div>
-          <div className="controls">
+          <div className="controls" hidden={view !== "rankings"}>
             {checkError && <span className="trigger-error" role="alert">✕ {checkError}</span>}
             <label className="switch" title="Check rankings automatically every day">
               <input
@@ -97,27 +113,33 @@ export default function App() {
           </div>
         </header>
 
-        <Hero
-          businessName={config.business.name}
-          keywordCount={config.keywords.length}
-          paused={state.paused}
-          lastSuccessfulAt={state.lastSuccessfulAt}
-        />
+        {view === "discovery" ? (
+          <DiscoveryView />
+        ) : (
+          <>
+            <Hero
+              businessName={config.business.name}
+              keywordCount={config.keywords.length}
+              paused={state.paused}
+              lastSuccessfulAt={state.lastSuccessfulAt}
+            />
 
-        <section className="sites" aria-label="Tracked keywords">
-          {config.keywords.map((keyword) => (
-            <KeywordCard key={keyword} keyword={keyword} />
-          ))}
-        </section>
+            <section className="sites" aria-label="Tracked keywords">
+              {config.keywords.map((keyword) => (
+                <KeywordCard key={keyword} keyword={keyword} />
+              ))}
+            </section>
 
-        <section className="observatory">
-          <div className="obs-grid">
-            <SignalsFeed businessDomain={config.business.domain} />
-            <TrackingPanel config={config} />
-          </div>
-        </section>
+            <section className="observatory">
+              <div className="obs-grid">
+                <SignalsFeed businessDomain={config.business.domain} />
+                <TrackingPanel config={config} />
+              </div>
+            </section>
 
-        <ActivityFeed runs={runs} />
+            <ActivityFeed runs={runs} />
+          </>
+        )}
 
         <footer className="footer quiet">
           Signal watches your search rankings on a schedule, remembers every run,
